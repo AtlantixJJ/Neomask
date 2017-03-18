@@ -3,28 +3,23 @@ require 'nnx'
 require 'cunn'
 require 'cudnn'
 require 'cutorch'
-local Neomask,_ = torch.class("nn.Neomask",'nn.Container')
+local DecompNet,_ = torch.class("nn.DecompNet",'nn.Container')
 
-function Neomask:__init(config)
-    print("Neomask Model...")
+function DecompNet:__init(config)
+    print("BaseLine Model From Layer 6. Forward-Backward Combined.")
     self.gpu1 = config.gpu1
     self.gpu2 = config.gpu2
 
     cutorch.setDevice(self.gpu1)
     self.M = config.model:cuda()
-    local tempin = torch.rand(12,3,224,224):cuda()
-    local temp = self.M:forward(tempin)
-    self.M:backward(tempin,temp)
     self.config = config
     self.name = config.name
 
     self.ks = 3
     self.pd = 1
-    self.fs = 64
+    self.fs = 32
 
-    self.lIns = {}
-    self.lH = 10
-    self.lL = 6
+    self.layer = 6
 
     cutorch.setDevice(self.gpu2)
     self:build_extra()
@@ -32,10 +27,10 @@ function Neomask:__init(config)
 
 end
 
-function Neomask:build_tail()
+function DecompNet:build_tail()
     -- scale up to input    
     --print(self.M.modules[self.layer].gradInput:size())
-    local scale = 2 -- 224 / self.M.modules[self.layer].gradInput:size(3)
+    local scale = 4 -- 224 / self.M.modules[self.layer].gradInput:size(3)
     self.tail = nn.Sequential()
 
     self.tail:add(nn.SpatialUpSamplingBilinear(scale))
@@ -44,52 +39,48 @@ function Neomask:build_tail()
     self.tail = self.tail:cuda()
 end
 
-function Neomask:build_Neuint(layer,scale)
-    local Neuint = nn.Sequential()
+function DecompNet:build_extra()
+    self.gradFit = nn.Sequential()
     local forward_feat = nn.Sequential()
     local backward_feat = nn.Sequential()
-    local fb_feat = nn.Sequential()
 
-    local nFeat = self.M.modules[layer].gradInput:size(2)
-
-    print(self.fs/scale)
+    print(self.fs)
 
     forward_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    forward_feat:add(cudnn.SpatialConvolution(nFeat,self.fs/scale,self.ks,self.ks,1,1))
-    forward_feat:add(nn.SpatialBatchNormalization(self.fs/scale))
+    forward_feat:add(cudnn.SpatialConvolution(256,self.fs,self.ks,self.ks,1,1))
+    forward_feat:add(nn.SpatialBatchNormalization(self.fs))
     forward_feat:add(cudnn.ReLU())
 
     backward_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    backward_feat:add(cudnn.SpatialConvolution(nFeat,self.fs/scale,self.ks,self.ks,1,1))
-    backward_feat:add(nn.SpatialBatchNormalization(self.fs/scale))
+    backward_feat:add(cudnn.SpatialConvolution(256,self.fs,self.ks,self.ks,1,1))
+    backward_feat:add(nn.SpatialBatchNormalization(self.fs))
     backward_feat:add(cudnn.ReLU())
 
-    fb_feat:add(nn.ParallelTable():add(forward_feat):add(backward_feat))
-    fb_feat:add(nn.JoinTable(2)) -- join at (batchNeuint
+    self.gradFit:add(nn.ParallelTable():add(forward_feat):add(backward_feat))
+    self.gradFit:add(nn.JoinTable(2)) -- join at (batch,x,256,256)
 
-    fb_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    fb_feat:add(cudnn.SpatialConvolution(2*self.fs/scale,self.fs/scale,self.ks,self.ks,1,1))
-    fb_feat:add(nn.SpatialBatchNormalization(self.fs/scale))
-    -- Neuint:add(cudnn.ReLU())
+    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    self.gradFit:add(cudnn.SpatialConvolution(2*self.fs,self.fs,self.ks,self.ks,1,1))
+    self.gradFit:add(nn.SpatialBatchNormalization(self.fs))
+    self.gradFit:add(cudnn.ReLU())
 
-    Neuint:add(nn.JoinTable(2))
-    Neuint:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    Neuint:add(cudnn.SpatialConvolution(2*self.fs/scale,self.fs/scale/2,self.ks,self.ks,1,1))
-    Neuint:add(nn.SpatialBatchNormalization(self.fs/scale/2))    
+    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    self.gradFit:add(cudnn.SpatialConvolution(self.fs,self.fs/2,self.ks,self.ks,1,1))
+    self.gradFit:add(nn.SpatialBatchNormalization(self.fs/2))
+    self.gradFit:add(cudnn.ReLU())
 
-    return Neuint:cuda()
+    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    self.gradFit:add(cudnn.SpatialConvolution(self.fs/2,self.fs/4,self.ks,self.ks,1,1))
+    self.gradFit:add(nn.SpatialBatchNormalization(self.fs/4))
+    self.gradFit:add(cudnn.ReLU())
+
+    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    self.gradFit:add(cudnn.SpatialConvolution(self.fs/4,1,self.ks,self.ks,1,1))
+
+    self.gradFit = self.gradFit:cuda()
 end
 
-function Neomask:build_extra()
-    local scale = 1
-    self.neuints = {}
-    for i=self.lL,self.lH do
-        self.neuints[i] = self:build_Neuint(i,scale)
-        scale = scale * 2
-    end
-end
-
-function Neomask:test_forward(input_batch,layer)
+function DecompNet:test_forward(input_batch,layer)
     -- input_batch should be CudaTensor
     self.inputs = input_batch
     local pred = self.M:forward(input_batch)
@@ -119,106 +110,95 @@ function Neomask:test_forward(input_batch,layer)
     return {self.ss_in,self.ss_in1,self.ss_in2}
 end
 
-function Neomask:forward(input_batch)
+function DecompNet:forward(input_batch)
     -- input_batch should be CudaTensor in gpu1
     cutorch.setDevice(self.gpu1)
     self.inputs = input_batch
-    local pre = self.M:forward(self.inputs) * 100
+    local pre = self.M:forward(self.inputs)
     local N = #self.M.modules
-
+    pre = pre * 100
     self.M:zeroGradParameters()
-    for i=1,self.lL do 
+    for i=1,7 do
         pre = self.M.modules[N-i+1]:backward(self.M.modules[N-i].output, pre)
     end
 
+    
     -- Build refine input
     cutorch.setDevice(self.gpu2)
-    for i=self.lL,self.lH do
-        self.lIns[i] = {self.M.modules[N-i].output:clone(), self.M.modules[N-i+1].gradInput:clone()}
-    end
-
-    for i=self.lL,self.lH do
-        self.lIns[i][3] = pre
-        --print(self.lIns[i])
-        pre = self.neuints[i]:forward(self.lIns[i])
-    end
-
-    print(pre:size())
+    self.ss_in = {self.M.modules[self.layer-1].output:clone(),self.M.modules[self.layer].gradInput:clone()}
+    -- print(self.ss_in)
 
     -- build net output
-    -- self.tailin = self.gradFit:forward(pre) -- :clone()
-    -- self.output = self.tail:forward(self.tailin) -- :clone()
-    -- print(self.output:size())
-    -- return self.output
+    self.tailin = self.gradFit:forward(self.ss_in) -- :clone()
+    self.output = self.tail:forward(self.tailin) -- :clone()
+
+    return self.output
 end
 
-function Neomask:backward(input_batch,gradInput)
+function DecompNet:backward(input_batch,gradInput)
     cutorch.setDevice(self.gpu2)
     self.tailgrad = self.tail:backward(self.tailin, gradInput) -- :clone()
-    pre = self.tailgrad
-    for i=self.lH,self.lL,-1 do
-        pre = self.neuints[i]:backward(self.lIns[i],pre)
-    end
+    self.gradFitin = self.gradFit:backward(self.ss_in,self.tailgrad) -- :clone()
     -- fdself.gradResin = self.M:backward(input_batch,self.gradFitin)
 end
 
-function Neomask:training()
+function DecompNet:training()
     cutorch.setDevice(self.gpu1)
     self.M:training()
     cutorch.setDevice(self.gpu2)
-    for k,n in pairs(self.neuints) do self.neuints[k]:training() end
+    self.gradFit:training()
     self.tail:training()
 end
 
-function Neomask:evaluate()
+function DecompNet:evaluate()
     cutorch.setDevice(self.gpu1)
     self.M:evaluate()
     cutorch.setDevice(self.gpu2)
-    for k,n in pairs(self.neuints) do self.neuints[k]:evaluate() end
+    self.gradFit:evaluate()
     self.tail:evaluate()
 end
 
-function Neomask:zeroGradParameters()
+function DecompNet:zeroGradParameters()
     cutorch.setDevice(self.gpu1)
     self.M:zeroGradParameters()
     cutorch.setDevice(self.gpu2)
-    for k,n in pairs(self.neuints) do self.neuints[k]:zeroGradParameters() end
+    self.gradFit:zeroGradParameters()
     self.tail:zeroGradParameters()
 end
 
-function Neomask:updateParameters(lr)
+function DecompNet:updateParameters(lr)
     -- self.M:updateParameters(lr)
     cutorch.setDevice(self.gpu2)
-    for k,n in pairs(self.neuints) do self.neuints[k]:updateParameters(lr) end
+    self.gradFit:updateParameters(lr)
     self.tail:updateParameters(lr)
 end
 
-function Neomask:cuda()
+function DecompNet:cuda()
     cutorch.setDevice(self.gpu1)
     self.M:cuda()
     cutorch.setDevice(self.gpu2)
-    for k,n in pairs(self.neuints) do self.neuints[k]:cuda() end
+    self.gradFit:cuda()
     self.tail:cuda()
 end
 
-function Neomask:float()
+function DecompNet:float()
     self.M:float()
-    for k,n in pairs(self.neuints) do self.neuints[k]:float() end
+    self.gradFit:float()
     self.tail:float()
 end
 
-function Neomask:clone(...)
+function DecompNet:clone(...)
     local f = torch.MemoryFile("rw"):binary()
     f:writeObject(self); f:seek(1)
     local clone = f:readObject(); f:close()
 
     if select('#',...) > 0 then
         clone.M:share(self.M,...)
-        for k,n in pairs(self.neuints) do clone.neuints[k]:share(self.neuints[k],...) end
+        clone.gradFit:share(self.gradFit,...)
         clone.tail:share(self.tail,...)
     end
 
     return clone
 end
 
-return nn.Neomask
+return nn.DecompNet

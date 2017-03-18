@@ -8,13 +8,16 @@ require 'image'
 require 'gnuplot'
 
 paths.dofile('myutils.lua')
-paths.dofile("model.lua")
+
+local select_model = "blg6naive.lua" -- "model.lua"
+paths.dofile(select_model)
+
 local default_config = paths.dofile('getconfig.lua')
-default_config.reload = "model/BLSFT"
+default_config.reload = "exps/BL_G6_Naive"
 local utils = paths.dofile('modelUtils.lua')
 
 -- set GPU
-default_config.gpu = 2
+default_config.gpu = 4
 print("Using GPU %d" % default_config.gpu)
 cutorch.setDevice(default_config.gpu)
 
@@ -80,12 +83,20 @@ im = data[1].inputs
 masks = data[1].labels
 -- denet.tail:get(2).bias[1] = -2
 -- cutorch.synchronize()
+c = denet.gradFit.modules[2]
+c.bias[1] = 0
 res = denet:forward(im:cuda())
 res = res:reshape(res:size(1),224,224)
-res = {}
+
+
+for i=1,16 do
+  save_pred(im[i],{res[i]},"res/"..i..".png",3)
+end
+
+--[[
 for i=4,7 do
   print(i)
-  csres = denet:test_forward(im:cuda(),i)
+  csres = denet:forward(im:cuda(),i)
   for k=1,32 do
     res[1] = csres[1][k]
     res[2] = csres[2][k]
@@ -93,7 +104,7 @@ for i=4,7 do
     save_pred(im[k],res,"res/"..k.."_"..i..".png")
   end
 end
---[[
+
 print("Saving...")
 for i=1,32 do
   save_comp(im[i], res[i], i..".png", 0.1, true)

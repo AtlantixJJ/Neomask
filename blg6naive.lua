@@ -6,12 +6,13 @@ require 'cudnn'
 local DecompNet,_ = torch.class("nn.DecompNet",'nn.Container')
 
 function DecompNet:__init(config)
+    print("BaseLine Model From Layer 6. Naive edition : 1 layer of conv.")
     self.M = config.model
     self.config = config
     self.name = config.name
 
-    self.ks = 5
-    self.pd = 2
+    self.ks = 3
+    self.pd = 1
     self.fs = 32
 
     self.layer = 6
@@ -36,22 +37,10 @@ end
 function DecompNet:build_extra()
     self.gradFit = nn.Sequential()
 
-    self.gradFit:add(nn.View(self.config.batch,256*56*56))
-    self.gradFit:add(nn.Normalize(2))
-    self.gradFit:add(nn.View(self.config.batch,256,56,56))
-
     self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    self.gradFit:add(cudnn.SpatialConvolution(256,self.fs,self.ks,self.ks,1,1))
-    self.gradFit:add(cudnn.ReLU())
+    self.gradFit:add(cudnn.SpatialConvolution(256,1,self.ks,self.ks,1,1))
 
-    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    self.gradFit:add(cudnn.SpatialConvolution(self.fs,2*self.fs,self.ks,self.ks,1,1))
-    self.gradFit:add(cudnn.ReLU())
-
-    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    self.gradFit:add(cudnn.SpatialConvolution(2*self.fs,1,self.ks,self.ks,1,1))
-
-    self.gradFit = self.gradFit:cuda()    
+    self.gradFit = self.gradFit:cuda()
 end
 
 function DecompNet:test_forward(input_batch,layer)
@@ -90,22 +79,8 @@ function DecompNet:forward(input_batch)
     local pred = self.M:forward(input_batch)
     local conf,ind = torch.max(pred, 2) -- max decomposition
 
-    -- build decomp output
-    --[[
-    local dectar = torch.zeros(input_batch:size(1), 1000)
-    for i=1,input_batch:size(1) do dectar[i][ind[i][1] ] = 1 end
-    dectar = torch.cmul(dectar,pred:double())
-    ]]--
-
-    -- build backward output
-    -- self.M:zeroGradParameters()
-    -- self.onehot_decomp = self.M:backward(input_batch,dectar:cuda()) -- :clone()
-
     self.M:zeroGradParameters()
     self.full_decomp = self.M:backward(input_batch,pred*100)
-
-    -- self.full_decomp = self.M.modules[2].gradInput
-    -- self.ss_in = torch.cmul(self.full_decomp,self.inputs)
 
     -- Build refine input
     self.ss_in = self.M.modules[self.layer].gradInput

@@ -8,17 +8,14 @@ Training and testing loop for SharpMask
 ------------------------------------------------------------------------------]]
 
 paths.dofile('trainMeters.lua')
-require 'cutorch'
+
 local Trainer = torch.class('Trainer')
 
 --------------------------------------------------------------------------------
 -- function: init
 function Trainer:__init(model, criterion, config)
-  print("Running in %s" % config.rundir)
+  print("Multi-GPU Trainer running in %s" % config.rundir)
   -- training params
-  self.gpu1 = config.gpu1
-  self.gpu2 = config.gpu2
-
   self.model = model
   self.criterion = criterion
   self.lr = config.lr
@@ -46,15 +43,14 @@ function Trainer:train(epoch, dataloader)
   local timer = torch.Timer()
   local lossum = 0
   
-  for n, sample in dataloader:run() do
+  for n, sample in dataloader:run() dom
     -- copy samples to the GPU
-    cutorch.setDevice(self.gpu1)
+    cutorch.setDevice()
     self:copySamples(sample)
 
     -- forward/backward
     local outputs = self.model:forward(self.inputs)
-    local label_on2 = self.labels:clone()
-    local lossbatch = self.criterion:forward(outputs, label_on2)
+    local lossbatch = self.criterion:forward(outputs, self.labels)
     local imt = 100
     if lossbatch < 10 then
       lossum = lossum + lossbatch
@@ -63,11 +59,9 @@ function Trainer:train(epoch, dataloader)
         print("Iter %d Loss %.2f " % {n,lossum/imt})
         lossum = 0
       end
-      
-      local gradOutputs = self.criterion:backward(outputs, label_on2)
+      local gradOutputs = self.criterion:backward(outputs, self.labels)
       gradOutputs:mul(self.inputs:size(1))
       self.model:zeroGradParameters()
-      -- automatically change to gpu2
       self.model:backward(self.inputs, gradOutputs)
       self.model:updateParameters(self.lr)
 
@@ -104,7 +98,6 @@ function Trainer:test(epoch, dataloader)
 
   for n, sample in dataloader:run() do
     -- copy input and target to the GPU
-    cutorch.setDevice(self.gpu1)
     self:copySamples(sample)
 
     -- infer mask in batch

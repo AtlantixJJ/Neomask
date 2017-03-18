@@ -39,9 +39,13 @@ function norm_proc(raw,mode)
         pred = torch.abs(pred)
         pred = (pred-pred:min())/(pred:max()-pred:min())
     elseif mode == 3 then -- truncate mode
+        print(pred:min(),pred:max())
         pred[ torch.le(pred,-1) ] = -1
         pred[ torch.le(-pred,-1)] = 1
-        pred = (pred + 1) / 2.
+        if pred:max() ~= pred:min() then
+            pred = (pred-pred:min())/(pred:max()-pred:min())
+        end
+        print(pred:min(),pred:max())
     end
     return pred
 end
@@ -83,12 +87,12 @@ function concate_imgs(imgs)
     return res
 end
 
-function save_pred(im,reles,name)
+function save_pred(im,reles,name,mode)
     im = norm_proc(im,1)
     local comb = im:clone():float()
     -- reles is table
     for i=1,#reles do
-        rele = gray2jetrgb(norm_proc(reles[i],1)) -- truncate mode
+        rele = gray2jetrgb(norm_proc(reles[i],mode)) -- truncate mode
         rele = rele:float()
     
         comb = torch.cat(comb, rele, 3)
