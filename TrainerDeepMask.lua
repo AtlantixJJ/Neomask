@@ -17,6 +17,7 @@ local Trainer = torch.class('Trainer')
 function Trainer:__init(model, criterion, config)
   -- training params
   self.config = config
+  if self.config.fix == true then print("FIXED!") end
   self.model = model
   self.maskNet = nn.Sequential():add(model.trunk):add(model.maskBranch)
   self.scoreNet = nn.Sequential():add(model.trunk):add(model.scoreBranch)
@@ -88,7 +89,8 @@ function Trainer:train(epoch, dataloader)
     model:backward(self.inputs, gradOutputs)
 
     -- optimize
-    optim.sgd(fevaltrunk, self.pt, self.optimState.trunk)
+    -- NOTICE !!! Not optimized for semantic segmentation
+    if self.config.fix == false then optim.sgd(fevaltrunk, self.pt, self.optimState.trunk) end
     optim.sgd(feval, params, optimState)
 
     -- update loss
@@ -96,9 +98,15 @@ function Trainer:train(epoch, dataloader)
   end
 
   -- write log
-  local logepoch =
-    string.format('[train] | epoch %05d | s/batch %04.2f | loss: %07.5f ',
-      epoch, timer:time().real/dataloader:size(),self.lossmeter:value())
+  if self.config.fix == false then
+    local logepoch =
+      string.format('[train] | epoch %05d | s/batch %04.2f | loss: %07.5f ',
+        epoch, timer:time().real/dataloader:size(),self.lossmeter:value())
+  else
+    local logepoch =
+      string.format('[FIXED train] | epoch %05d | s/batch %04.2f | loss: %07.5f ',
+        epoch, timer:time().real/dataloader:size(),self.lossmeter:value())  
+  end
   print(logepoch)
   self.log:writeString(string.format('%s\n',logepoch))
   self.log:synchronize()

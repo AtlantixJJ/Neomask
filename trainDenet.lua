@@ -8,7 +8,7 @@ require 'image'
 
 paths.dofile('myutils.lua')
 
-local select_model = "blg6fbc.lua" -- "blg6naive.lua" -- "model.lua"
+local select_model = "blg6fbc.lua" -- "blg6fbcnaive.lua" -- -- "blg6naive.lua" -- "model.lua"
 paths.dofile(select_model)
 
 local default_config = paths.dofile('getconfig.lua')
@@ -16,7 +16,8 @@ local default_config = paths.dofile('getconfig.lua')
 local utils = paths.dofile('modelUtils.lua')
 
 -- set GPU
-default_config.gpu2 = 1
+default_config.gpu2 = default_config.gpu
+default_config.gpu1 = default_config.gpu
 print("Using GPU %d" % default_config.gpu)
 cutorch.setDevice(default_config.gpu)
 

@@ -2,24 +2,50 @@ require 'nn'
 require 'nnx'
 require 'cunn'
 require 'cudnn'
-
+require 'cutorch'
 local DecompNet,_ = torch.class("nn.DecompNet",'nn.Container')
 
+function DecompNet:build_extra()
+    self.gradFit = nn.Sequential()
+
+    -- self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    self.gradFit:add(cudnn.SpatialConvolution(256,64,1,1,1,1))
+    self.gradFit:add(cudnn.ReLU())
+
+    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    self.gradFit:add(cudnn.SpatialConvolution(64,32,self.ks,self.ks,1,1))
+    self.gradFit:add(cudnn.ReLU())
+
+    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    self.gradFit:add(cudnn.SpatialConvolution(32,8,self.ks,self.ks,1,1))
+    self.gradFit:add(cudnn.ReLU())
+
+    self.gradFit:add(nn.Linear(8*56*56,56*56))
+    self.gradFit:add(cudnn.ReLU())
+    self.gradFit:add(nn.View(self.config.batch,56,56))
+
+    self.gradFit = self.gradFit:cuda()
+end
+
 function DecompNet:__init(config)
-    print("BaseLine Model From Layer 6. Naive edition : 1 layer of conv.")
-    self.M = config.model
+    print("BaseLine Model From Layer 6. Forward-Backward Combined.")
+    self.gpu1 = config.gpu1
+    self.gpu2 = config.gpu2
+
+    cutorch.setDevice(self.gpu1)
+    self.M = config.model:cuda()
     self.config = config
     self.name = config.name
 
     self.ks = 3
     self.pd = 1
-    self.fs = 32
+    self.fs = 64
 
     self.layer = 6
 
+    cutorch.setDevice(self.gpu2)
     self:build_extra()
     self:build_tail()
-
 end
 
 function DecompNet:build_tail()
@@ -37,11 +63,25 @@ end
 function DecompNet:build_extra()
     self.gradFit = nn.Sequential()
 
+    -- self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    self.gradFit:add(cudnn.SpatialConvolution(256,64,1,1,1,1))
+    self.gradFit:add(cudnn.ReLU())
+
     self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    self.gradFit:add(cudnn.SpatialConvolution(256,1,self.ks,self.ks,1,1))
+    self.gradFit:add(cudnn.SpatialConvolution(64,32,self.ks,self.ks,1,1))
+    self.gradFit:add(cudnn.ReLU())
+
+    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    self.gradFit:add(cudnn.SpatialConvolution(32,8,self.ks,self.ks,1,1))
+    self.gradFit:add(cudnn.ReLU())
+
+    self.gradFit:add(nn.Linear(8*56*56,56*56))
+    self.gradFit:add(cudnn.ReLU())
+    self.gradFit:add(nn.View(self.config.batch,56,56))
 
     self.gradFit = self.gradFit:cuda()
 end
+
 
 function DecompNet:test_forward(input_batch,layer)
     -- input_batch should be CudaTensor
@@ -74,16 +114,21 @@ function DecompNet:test_forward(input_batch,layer)
 end
 
 function DecompNet:forward(input_batch)
-    -- input_batch should be CudaTensor
+    -- input_batch should be CudaTensor in gpu1
+    cutorch.setDevice(self.gpu1)
     self.inputs = input_batch
-    local pred = self.M:forward(input_batch)
-    local conf,ind = torch.max(pred, 2) -- max decomposition
-
+    local pre = self.M:forward(self.inputs)
+    local N = #self.M.modules
+    pre = pre * 100
     self.M:zeroGradParameters()
-    self.full_decomp = self.M:backward(input_batch,pred*100)
+    for i=1,7 do
+        pre = self.M.modules[N-i+1]:backward(self.M.modules[N-i].output, pre)
+    end
 
     -- Build refine input
-    self.ss_in = self.M.modules[self.layer].gradInput
+    cutorch.setDevice(self.gpu2)
+    self.ss_in = {self.M.modules[self.layer-1].output:clone(),self.M.modules[self.layer].gradInput:clone()}
+    -- print(self.ss_in)
 
     -- build net output
     self.tailin = self.gradFit:forward(self.ss_in) -- :clone()
@@ -93,37 +138,51 @@ function DecompNet:forward(input_batch)
 end
 
 function DecompNet:backward(input_batch,gradInput)
+    cutorch.setDevice(self.gpu2)
     self.tailgrad = self.tail:backward(self.tailin, gradInput) -- :clone()
     self.gradFitin = self.gradFit:backward(self.ss_in,self.tailgrad) -- :clone()
     -- fdself.gradResin = self.M:backward(input_batch,self.gradFitin)
 end
 
 function DecompNet:training()
+    cutorch.setDevice(self.gpu1)
     self.M:training()
+    cutorch.setDevice(self.gpu2)
     self.gradFit:training()
     self.tail:training()
 end
 
 function DecompNet:evaluate()
+    cutorch.setDevice(self.gpu1)
     self.M:evaluate()
+    cutorch.setDevice(self.gpu2)
     self.gradFit:evaluate()
     self.tail:evaluate()
 end
 
 function DecompNet:zeroGradParameters()
+    cutorch.setDevice(self.gpu1)
     self.M:zeroGradParameters()
+    cutorch.setDevice(self.gpu2)
     self.gradFit:zeroGradParameters()
     self.tail:zeroGradParameters()
 end
 
 function DecompNet:updateParameters(lr)
     -- self.M:updateParameters(lr)
+    cutorch.setDevice(self.gpu2)
     self.gradFit:updateParameters(lr)
     self.tail:updateParameters(lr)
 end
 
+function DecompNet:getParameters()
+    return self.gradFit:getParameters()
+end
+
 function DecompNet:cuda()
+    cutorch.setDevice(self.gpu1)
     self.M:cuda()
+    cutorch.setDevice(self.gpu2)
     self.gradFit:cuda()
     self.tail:cuda()
 end

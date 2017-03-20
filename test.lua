@@ -9,15 +9,17 @@ require 'gnuplot'
 
 paths.dofile('myutils.lua')
 
-local select_model = "blg6naive.lua" -- "model.lua"
+local select_model = "blg6fbc.lua" -- "model.lua"
 paths.dofile(select_model)
 
 local default_config = paths.dofile('getconfig.lua')
-default_config.reload = "exps/BL_G6_Naive"
+default_config.reload = "exps/BL_G6_FBC"
 local utils = paths.dofile('modelUtils.lua')
 
 -- set GPU
-default_config.gpu = 4
+default_config.gpu = 3
+default_config.gpu2 = default_config.gpu
+default_config.gpu1 = default_config.gpu
 print("Using GPU %d" % default_config.gpu)
 cutorch.setDevice(default_config.gpu)
 
@@ -46,16 +48,11 @@ else
   local resnet = torch.load("pretrained/resnet-50.t7")
   utils.BNtoFixed(resnet, true)
   resnet:add(nn.SoftMax())
-  resnet = resnet:cuda()
 
-  local mconfig = {}
-  mconfig.batch = default_config.batch
-  mconfig.gSz = default_config.gSz
-  mconfig.model = resnet
-  mconfig.name = default_config.name
-
+  default_config.model = resnet
   -- Building DeNet
-  denet = nn.DecompNet(mconfig)
+  denet = nn.DecompNet(default_config)
+  default_config.model = None
 end
 
 local DataLoader = paths.dofile("DataLoaderNew.lua")
@@ -81,32 +78,12 @@ end
 data = run_dataset(trainLoader,20)
 im = data[1].inputs
 masks = data[1].labels
--- denet.tail:get(2).bias[1] = -2
--- cutorch.synchronize()
-c = denet.gradFit.modules[2]
-c.bias[1] = 0
-res = denet:forward(im:cuda())
+cutorch.setDevice(default_config.gpu)
+ins = im:cuda():clone()
+res = denet:forward(ins)
 res = res:reshape(res:size(1),224,224)
-
-
-for i=1,16 do
-  save_pred(im[i],{res[i]},"res/"..i..".png",3)
-end
-
---[[
-for i=4,7 do
-  print(i)
-  csres = denet:forward(im:cuda(),i)
-  for k=1,32 do
-    res[1] = csres[1][k]
-    res[2] = csres[2][k]
-    res[3] = csres[3][k]
-    save_pred(im[k],res,"res/"..k.."_"..i..".png")
-  end
-end
 
 print("Saving...")
 for i=1,32 do
   save_comp(im[i], res[i], i..".png", 0.1, true)
 end
-]]

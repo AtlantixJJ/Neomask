@@ -4,7 +4,6 @@ require 'cunn'
 require 'cudnn'
 require 'cutorch'
 local DecompNet,_ = torch.class("nn.DecompNet",'nn.Container')
-
 function DecompNet:__init(config)
     print("BaseLine Model From Layer 6. Forward-Backward Combined.")
     self.gpu1 = config.gpu1
@@ -17,14 +16,13 @@ function DecompNet:__init(config)
 
     self.ks = 3
     self.pd = 1
-    self.fs = 32
+    self.fs = 64
 
     self.layer = 6
 
     cutorch.setDevice(self.gpu2)
     self:build_extra()
     self:build_tail()
-
 end
 
 function DecompNet:build_tail()
@@ -51,18 +49,23 @@ function DecompNet:build_extra()
     forward_feat:add(nn.SpatialBatchNormalization(self.fs))
     forward_feat:add(cudnn.ReLU())
 
+    forward_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    forward_feat:add(cudnn.SpatialConvolution(self.fs,self.fs/2,self.ks,self.ks,1,1))
+    forward_feat:add(nn.SpatialBatchNormalization(self.fs/2))
+    forward_feat:add(cudnn.ReLU())
+
     backward_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
     backward_feat:add(cudnn.SpatialConvolution(256,self.fs,self.ks,self.ks,1,1))
     backward_feat:add(nn.SpatialBatchNormalization(self.fs))
     backward_feat:add(cudnn.ReLU())
 
+    backward_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    backward_feat:add(cudnn.SpatialConvolution(self.fs,self.fs/2,self.ks,self.ks,1,1))
+    backward_feat:add(nn.SpatialBatchNormalization(self.fs/2))
+    backward_feat:add(cudnn.ReLU())
+
     self.gradFit:add(nn.ParallelTable():add(forward_feat):add(backward_feat))
     self.gradFit:add(nn.JoinTable(2)) -- join at (batch,x,256,256)
-
-    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    self.gradFit:add(cudnn.SpatialConvolution(2*self.fs,self.fs,self.ks,self.ks,1,1))
-    self.gradFit:add(nn.SpatialBatchNormalization(self.fs))
-    self.gradFit:add(cudnn.ReLU())
 
     self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
     self.gradFit:add(cudnn.SpatialConvolution(self.fs,self.fs/2,self.ks,self.ks,1,1))
@@ -75,7 +78,12 @@ function DecompNet:build_extra()
     self.gradFit:add(cudnn.ReLU())
 
     self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    self.gradFit:add(cudnn.SpatialConvolution(self.fs/4,1,self.ks,self.ks,1,1))
+    self.gradFit:add(cudnn.SpatialConvolution(self.fs/4,self.fs/8,self.ks,self.ks,1,1))
+    self.gradFit:add(nn.SpatialBatchNormalization(self.fs/8))
+    self.gradFit:add(cudnn.ReLU())
+
+    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    self.gradFit:add(cudnn.SpatialConvolution(self.fs/8,1,self.ks,self.ks,1,1))
 
     self.gradFit = self.gradFit:cuda()
 end
@@ -122,7 +130,6 @@ function DecompNet:forward(input_batch)
         pre = self.M.modules[N-i+1]:backward(self.M.modules[N-i].output, pre)
     end
 
-    
     -- Build refine input
     cutorch.setDevice(self.gpu2)
     self.ss_in = {self.M.modules[self.layer-1].output:clone(),self.M.modules[self.layer].gradInput:clone()}
@@ -171,6 +178,10 @@ function DecompNet:updateParameters(lr)
     cutorch.setDevice(self.gpu2)
     self.gradFit:updateParameters(lr)
     self.tail:updateParameters(lr)
+end
+
+function DecompNet:getParameters()
+    return self.gradFit:getParameters()
 end
 
 function DecompNet:cuda()
