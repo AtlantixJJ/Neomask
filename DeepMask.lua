@@ -46,6 +46,14 @@ function DeepMask:__init(config)
   print(string.format('| number of paramaters total: %d', npt+nps+npm))
 end
 
+function DeepMask:predict_m(input_batch)
+  local common = self.trunk:forward(input_batch)
+  local score = self.scoreBranch:forward(common)
+  local mask = self.maskBranch:forward(common)
+  return mask,score
+end
+
+
 --------------------------------------------------------------------------------
 -- function: create common trunk
 function DeepMask:createTrunk(config)

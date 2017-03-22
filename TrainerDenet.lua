@@ -44,11 +44,66 @@ function Trainer:__init(model, criterion, config)
 end
 
 
-
-
 --------------------------------------------------------------------------------
 -- function: train
-function Trainer:train(epoch, dataloader)
+
+function Trainer:train(epoch,dataloader)
+  print("Using Ordinary Training...")
+  self.model:training()
+  self:updateScheduler(epoch)
+  self.lossmeter:reset()
+
+  local timer = torch.Timer()
+  local imt = 100
+  local lossum = 0
+  local lossbatch = 0
+  
+  for n, sample in dataloader:run() do
+      -- copy samples to the GPU
+      cutorch.setDevice(self.gpu1)
+      self:copySamples(sample)
+      local outputs = self.model:forward(self.inputs)
+      cutorch.setDevice(self.gpu2)
+      local label_on2 = self.labels:clone()
+      lossbatch = self.criterion:forward(outputs, label_on2)
+      if lossbatch < 10 then
+          lossum = lossum + lossbatch
+          -- print(sample,lossbatch)
+          if n % imt == 0 then
+            print("Iter %d Loss %.2f " % {n, lossum/imt})
+            lossum = 0
+          end
+
+          local gradOutputs = self.criterion:backward(outputs, label_on2)
+          gradOutputs:mul(self.inputs:size(1))
+          self.model:zeroGradParameters()
+          -- automatically change to gpu2
+          self.model:backward(self.inputs, gradOutputs)
+
+          self.model:updateParameters(self.lr)
+      end
+      -- update loss
+      self.lossmeter:add(lossbatch)
+  end
+    -- write log
+  local logepoch =
+    string.format('[train] | epoch %05d | s/batch %04.2f | loss: %07.5f ',
+      epoch, timer:time().real/dataloader:size(),self.lossmeter:value())
+  print(logepoch)
+  self.log:writeString(string.format('%s\n',logepoch))
+  self.log:synchronize()
+
+  --save model
+  torch.save(string.format('%s/model.t7', self.rundir),self.modelsv)
+  if epoch%50 == 0 then
+    torch.save(string.format('%s/model_%d.t7', self.rundir, epoch),
+      self.modelsv)
+  end
+  collectgarbage()
+end
+
+function Trainer:train_func(epoch, dataloader)
+  print("Using Function Training...")
   self.model:training()
   self:updateScheduler(epoch)
   self.lossmeter:reset()

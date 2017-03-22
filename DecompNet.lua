@@ -3,10 +3,11 @@ require 'nnx'
 require 'cunn'
 require 'cudnn'
 require 'cutorch'
+
 local DecompNet,_ = torch.class("nn.DecompNet",'nn.Container')
 
 function DecompNet:__init(config,layer)
-    print("BaseLine Model From Layer %d. Backward Only." % layer)
+    print("Decomp BaseNet.")
     self.gpu1 = config.gpu1
     self.gpu2 = config.gpu2
 
@@ -42,9 +43,7 @@ end
 
 -- tail is used for clearing ups
 function DecompNet:build_tail()
-    -- scale up to input    
-    --print(self.M.modules[self.layer].gradInput:size())
-
+    -- scale up to input
     print("Scale %d : %d -> %d" % {scale, self.in_size, self.from_size})
 
     self.tail = nn.Sequential()
@@ -59,83 +58,12 @@ end
 -- extra layers to relevance output
 function DecompNet:build_extra()
     self.gradFit = nn.Sequential()
-    local forward_feat = nn.Sequential()
-    local backward_feat = nn.Sequential()
-
-    print(self.fs)
-
-    forward_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    forward_feat:add(cudnn.SpatialConvolution(self.from_nfeat,self.fs,self.ks,self.ks,1,1))
-    forward_feat:add(nn.SpatialBatchNormalization(self.fs))
-    forward_feat:add(cudnn.ReLU())
-
-    forward_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    forward_feat:add(cudnn.SpatialConvolution(self.fs,self.fs/2,self.ks,self.ks,1,1))
-    forward_feat:add(nn.SpatialBatchNormalization(self.fs/2))
-    forward_feat:add(cudnn.ReLU())
-
-    backward_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    backward_feat:add(cudnn.SpatialConvolution(self.from_nfeat,self.fs,self.ks,self.ks,1,1))
-    backward_feat:add(nn.SpatialBatchNormalization(self.fs))
-    backward_feat:add(cudnn.ReLU())
-
-    backward_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    backward_feat:add(cudnn.SpatialConvolution(self.fs,self.fs/2,self.ks,self.ks,1,1))
-    backward_feat:add(nn.SpatialBatchNormalization(self.fs/2))
-    backward_feat:add(cudnn.ReLU())
-
-    self.gradFit:add(nn.ParallelTable():add(forward_feat):add(backward_feat))
-    self.gradFit:add(nn.JoinTable(2)) -- join at (batch,x,256,256)
-
-    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    self.gradFit:add(cudnn.SpatialConvolution(self.fs,self.fs/2,self.ks,self.ks,1,1))
-    self.gradFit:add(nn.SpatialBatchNormalization(self.fs/2))
-    self.gradFit:add(cudnn.ReLU())
-
-    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    self.gradFit:add(cudnn.SpatialConvolution(self.fs/2,self.fs/4,self.ks,self.ks,1,1))
-    self.gradFit:add(nn.SpatialBatchNormalization(self.fs/4))
-    self.gradFit:add(cudnn.ReLU())
-
-    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    self.gradFit:add(cudnn.SpatialConvolution(self.fs/4,self.fs/8,self.ks,self.ks,1,1))
-    self.gradFit:add(nn.SpatialBatchNormalization(self.fs/8))
-    self.gradFit:add(cudnn.ReLU())
-
-    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    self.gradFit:add(cudnn.SpatialConvolution(self.fs/8,1,self.ks,self.ks,1,1))
-
+    self.gradFit:add(nn.Identity())
     self.gradFit = self.gradFit:cuda()
 end
 
 function DecompNet:test_forward(input_batch,layer)
-    -- input_batch should be CudaTensor
-    self.inputs = input_batch
-    local pred = self.M:forward(input_batch)
-    local conf,ind = torch.max(pred, 2) -- max decomposition
 
-    self.M:zeroGradParameters()
-    self.M:backward(input_batch,pred*100)
-
-    local scale = 224 / self.M.modules[layer].gradInput:size(3)
-
-    self.open_net = nn.Sequential()
-    self.open_net:add(nn.Sum(2))
-    self.open_net:add(nn.SpatialUpSamplingBilinear(scale))
-    self.open_net:add(nn.SpatialZeroPadding(1,1))
-    self.open_net:add(nn.SpatialAveragePooling(3,3,1,1))
-    self.open_net = self.open_net:cuda()
-
-    self.ss_in = self.open_net:forward(self.M.modules[layer].gradInput:cuda()):clone()
-    self.ss_in1 = self.open_net:forward(self.M.modules[layer-1].output:cuda()):clone()
-    
-    -- print(torch.norm(self.M.modules[layer].gradInput,2),torch.norm(self.M.modules[layer-1].output,2))
-    
-    temp = torch.cmul(self.M.modules[layer].gradInput:clone(),self.M.modules[layer-1].output:clone())
-    self.ss_in2 = self.open_net:forward(temp:cuda()):clone()
-    -- print(self.M.modules[layer].gradInput:size(),self.ss_in:size(),self.M.modules[layer-1].output:size(),self.ss_in1:size())
-
-    return {self.ss_in,self.ss_in1,self.ss_in2}
 end
 
 function DecompNet:forward(input_batch)
@@ -144,9 +72,10 @@ function DecompNet:forward(input_batch)
     self.inputs = input_batch
     local pre = self.M:forward(self.inputs)
     local N = #self.M.modules
+    local D = N - self.layer
     pre = pre * 100
     self.M:zeroGradParameters()
-    for i=1,7 do
+    for i=1,D do
         pre = self.M.modules[N-i+1]:backward(self.M.modules[N-i].output, pre)
     end
 

@@ -4,27 +4,42 @@ This source code is licensed under the BSD-style license found in the
 LICENSE file in the root directory of this source tree. An additional grant
 of patent rights can be found in the PATENTS file in the same directory.
 
-Training and testing loop for SharpMask
+Training for simulated Deepmask
 ------------------------------------------------------------------------------]]
-
+require 'math'
+local optim = require 'optim'
 paths.dofile('trainMeters.lua')
-require 'cutorch'
-require 'optim'
+
 local Trainer = torch.class('Trainer')
 
 --------------------------------------------------------------------------------
 -- function: init
 function Trainer:__init(model, criterion, config)
-  print("Running in %s" % config.rundir)
-  print("Optim : %s" % config.optim)
   -- training params
-  self.gpu1 = config.gpu1
-  self.gpu2 = config.gpu2
-
+  self.config = config
+  if self.config.fix == true then print("FIXED!") end
   self.model = model
-  self.params, self.gradParams = self.model:getParameters()
+
   self.criterion = criterion
+  self.criterion_class = nn.CrossEntropyCriterion():cuda()
   self.lr = config.lr
+  self.optimState ={}
+  for k,v in pairs({'trunk','mask','score'}) do
+    self.optimState[v] = {
+      learningRate = config.lr,
+      learningRateDecay = 0,
+      momentum = config.momentum,
+      dampening = 0,
+      weightDecay = config.wd,
+    }
+  end
+  self.optimState.trunk.learningRate = 0.1
+
+  -- params and gradparams
+  self.pm,self.gm = model.maskBranch:getParameters();collectgarbage()
+  self.ps,self.gs = model.scoreBranch:getParameters();collectgarbage()
+  self.pt,self.gt = model.M:getParameters();collectgarbage()
+  
 
   -- allocate cuda tensors
   self.inputs, self.labels = torch.CudaTensor(), torch.CudaTensor()
@@ -32,19 +47,13 @@ function Trainer:__init(model, criterion, config)
   -- meters
   self.lossmeter  = LossMeter()
   self.maskmeter  = IouMeter(0.5,config.testmaxload*config.batch)
-  self.optimizer = config.optim
-  self.optimState = {learningRate=0.01,momentum=0.9,weightDecay=0.01,}
-
-  -- self.optimState
+  self.scoremeter = BinaryMeter()
 
   -- log
   self.modelsv = {model=model:clone('weight', 'bias'),config=config}
   self.rundir = config.rundir
   self.log = torch.DiskFile(self.rundir .. '/log', 'rw'); self.log:seekEnd()
 end
-
-
-
 
 --------------------------------------------------------------------------------
 -- function: train
@@ -54,69 +63,122 @@ function Trainer:train(epoch, dataloader)
   self.lossmeter:reset()
 
   local timer = torch.Timer()
-  local imt = 100
-  local lossum = 0
-  local lossbatch = 0
-  
-  for n, sample in dataloader:run() do
+  -- print(self.criterion_class.output,self.gt:sum());
+  local fevalclass = function()  return self.criterion_class.output,   self.gt end
+  local fevalmask  = function() return self.criterion.output,   self.gm end
+  local fevalscore = function() return self.criterion.output,   self.gs end
+
+  if epoch > 100 then
+    for n, sample in dataloader:run() do
       -- copy samples to the GPU
-      cutorch.setDevice(self.gpu1)
       self:copySamples(sample)
 
-      function feval(params)
-          self.gradParams:zero()
-
-          local outputs = self.model:forward(self.inputs)
-          local label_on2 = self.labels:clone()
-          lossbatch = self.criterion:forward(outputs, label_on2)
-          if lossbatch < 10 then
-              lossum = lossum + lossbatch
-              -- print(sample,lossbatch)
-              if n % imt == 0 then
-                print("Iter %d Loss %.2f " % {n, lossum/imt})
-                lossum = 0
-              end
-
-              local gradOutputs = self.criterion:backward(outputs, label_on2)
-              gradOutputs:mul(self.inputs:size(1))
-              self.gradParams:zero()
-              -- automatically change to gpu2
-              self.model:backward(self.inputs, gradOutputs)
-          else
-              lossbatch = 0
-          end
-          return lossbatch, self.gradParams
+      -- forward/backward
+      local params, feval, optimState
+      if sample.head == 3 then
+        params = self.pt
+        feval, optimState = fevalclass, self.optimState.trunk
+      elseif sample.head == 1 then
+        params = self.pm
+        feval,optimState= fevalmask, self.optimState.mask
+      elseif sample.head == 2 then
+        params = self.ps
+        feval,optimState = fevalscore, self.optimState.score
       end
 
-      if self.optimizer == "adam" then
-          optim.adam(feval,self.params)
-      elseif self.optimizer == "sgd" then
-          optim.sgd(feval,self.params,self.optimState)
+      local outputs = self.model:forward(self.inputs,sample.head)
+      local lossbatch, gradOutputs
+      if sample.head == 3 then lossbatch = self.criterion_class:forward(outputs, self.labels)
+      else lossbatch = self.criterion:forward(outputs, self.labels) end
+
+      if lossbatch < 10 then
+        self.model:zeroGradParameters()
+
+        if sample.head == 3 then gradOutputs = self.criterion_class:backward(outputs, self.labels)
+        else gradOutputs = self.criterion:backward(outputs, self.labels) end
+
+        if sample.head == 1 then gradOutputs:mul(self.inputs:size(1)) end
+        self.model:backward(self.inputs, gradOutputs, sample.head)
+
+        -- optim.sgd(feval, params, optimState)
+        self.model:updateParameters(optimState.learningRate)
+
+        -- update loss
+        self.lossmeter:add(lossbatch)
+        print("HEAD %d Loss %.3f" % {sample.head, lossbatch})
+      else
+        print("Loss failed. HEAD : %d" % sample.head)
       end
-      if n % 10 == 0 then
-        collectgarbage()
+    end
+  else
+    print("LR:%f"%self.optimState.trunk.learningRate)
+    for n, sample in dataloader:run_class_only() do
+      -- copy samples to the GPU
+      self:copySamples(sample)
+
+      -- forward/backward
+      local params, feval, optimState
+      if sample.head == 3 then
+        params = self.pt
+        feval, optimState = fevalclass, self.optimState.trunk
+      elseif sample.head == 1 then
+        params = self.pm
+        feval,optimState= fevalmask, self.optimState.mask
+      elseif sample.head == 2 then
+        params = self.ps
+        feval,optimState = fevalscore, self.optimState.score
       end
-      -- update loss
-      self.lossmeter:add(lossbatch)
+
+      local outputs = self.model:forward(self.inputs,sample.head)
+      local lossbatch, gradOutputs
+      if sample.head == 3 then lossbatch = self.criterion_class:forward(outputs, self.labels)
+      else lossbatch = self.criterion:forward(outputs, self.labels) end
+
+      if lossbatch < 10 then
+        self.model:zeroGradParameters()
+
+        if sample.head == 3 then gradOutputs = self.criterion_class:backward(outputs, self.labels)
+        else gradOutputs = self.criterion:backward(outputs, self.labels) end
+
+        if sample.head == 1 then gradOutputs:mul(self.inputs:size(1)) end
+        self.model:backward(self.inputs, gradOutputs, sample.head)
+
+        optim.sgd(feval, params, optimState)
+        -- self.model:updateParameters(optimState.learningRate)
+
+        -- update loss
+        self.lossmeter:add(lossbatch)
+        print("HEAD %d Loss %.3f" % {sample.head, lossbatch})
+      else
+        print("Loss failed. HEAD : %d" % sample.head)
+      end
+    end
   end
-
+  local logepoch
+  
   -- write log
-  local logepoch =
-    string.format('[train] | epoch %05d | s/batch %04.2f | loss: %07.5f ',
-      epoch, timer:time().real/dataloader:size(),self.lossmeter:value())
+  if self.config.fix == false then
+    logepoch =
+      string.format('[train] | epoch %05d | s/batch %04.2f | loss: %07.5f ',
+        epoch, timer:time().real/dataloader:size(),self.lossmeter:value())
+  else
+    logepoch =
+      string.format('[FIXED train] | epoch %05d | s/batch %04.2f | loss: %07.5f ',
+        epoch, timer:time().real/dataloader:size(),self.lossmeter:value())  
+  end
   print(logepoch)
   self.log:writeString(string.format('%s\n',logepoch))
   self.log:synchronize()
 
   --save model
   torch.save(string.format('%s/model.t7', self.rundir),self.modelsv)
-  if epoch%50 == 0 then
+  if epoch%10 == 0 then
     torch.save(string.format('%s/model_%d.t7', self.rundir, epoch),
       self.modelsv)
   end
+
   collectgarbage()
 end
-
 
 --------------------------------------------------------------------------------
 -- function: test
@@ -124,18 +186,20 @@ local maxacc = 0
 function Trainer:test(epoch, dataloader)
   self.model:evaluate()
   self.maskmeter:reset()
-
+  self.scoremeter:reset()
 
   for n, sample in dataloader:run() do
     -- copy input and target to the GPU
-    cutorch.setDevice(self.gpu1)
     self:copySamples(sample)
 
-    -- infer mask in batch
-    local outputs = self.model:forward(self.inputs):float()
+    if sample.head == 1 then
+      local outputs = self.model:forward(self.inputs,sample.head)
+      self.maskmeter:add(outputs:view(self.labels:size()),self.labels)
+    else
+      local outputs = self.scoreNet:forward(self.inputs, sample.head)
+      self.scoremeter:add(outputs, self.labels)
+    end
     cutorch.synchronize()
-
-    self.maskmeter:add(outputs:view(sample.labels:size()),sample.labels)
 
   end
   self.model:training()
@@ -152,11 +216,11 @@ function Trainer:test(epoch, dataloader)
   local logepoch =
     string.format('[test]  | epoch %05d '..
       '| IoU: mean %06.2f median %06.2f suc@.5 %06.2f suc@.7 %06.2f '..
-      '| bestmodel %s',
+      '| acc %06.2f | bestmodel %s',
       epoch,
       self.maskmeter:value('mean'),self.maskmeter:value('median'),
       self.maskmeter:value('0.5'), self.maskmeter:value('0.7'),
-      bestmodel and '*' or 'x')
+      self.scoremeter:value(), bestmodel and '*' or 'x')
   print(logepoch)
   self.log:writeString(string.format('%s\n',logepoch))
   self.log:synchronize()
@@ -176,15 +240,16 @@ end
 function Trainer:updateScheduler(epoch)
   if self.lr == 0 then
     local regimes = {
-      {  1,     9,  5e-3},
-      {  10,    20,  1e-3},
-      { 21,     50,  5e-4},
-      { 51,    1e8,  1e-4}
+      {   1,  50, 0.1, 5e-4},
+      {  51, 120, 5e-4, 5e-4},
+      { 121, 1e8, 1e-4, 5e-4}
     }
 
     for _, row in ipairs(regimes) do
       if epoch >= row[1] and epoch <= row[2] then
-        self.lr = row[3]
+        for k,v in pairs(self.optimState) do
+          v.learningRate=row[3]*math.pow(0.5,math.floor((epoch - 1) / 4)); v.weightDecay=row[4]
+        end
       end
     end
   end

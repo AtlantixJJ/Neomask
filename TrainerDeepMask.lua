@@ -97,13 +97,15 @@ function Trainer:train(epoch, dataloader)
     self.lossmeter:add(lossbatch)
   end
 
+  local logepoch
+  
   -- write log
   if self.config.fix == false then
-    local logepoch =
+    logepoch =
       string.format('[train] | epoch %05d | s/batch %04.2f | loss: %07.5f ',
         epoch, timer:time().real/dataloader:size(),self.lossmeter:value())
   else
-    local logepoch =
+    logepoch =
       string.format('[FIXED train] | epoch %05d | s/batch %04.2f | loss: %07.5f ',
         epoch, timer:time().real/dataloader:size(),self.lossmeter:value())  
   end

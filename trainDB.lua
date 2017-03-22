@@ -8,10 +8,16 @@ require 'image'
 
 paths.dofile('myutils.lua')
 
-local select_model = "blgx_bnaive.lua" -- "blg6fbc.lua" -- "blg6fbcnaive.lua" -- -- "blg6naive.lua" -- "model.lua"
-paths.dofile(select_model)
-
 local default_config = paths.dofile('getconfig.lua')
+
+-- fixing arguments
+print("Selecting layer to be 6")
+default_config.layer = 6
+print("Classification Mode...")
+default_config.classify = true
+
+local select_model =  "blgx_fbc_naive.lua"
+paths.dofile(select_model)
 
 local utils = paths.dofile('modelUtils.lua')
 
@@ -20,14 +26,6 @@ default_config.gpu2 = default_config.gpu
 default_config.gpu1 = default_config.gpu
 print("Using GPU %d" % default_config.gpu)
 cutorch.setDevice(default_config.gpu)
-
-print("Loading Imagenet List...")
-f = io.open("Neomask/synset_words.txt")
-syn_list = {}
-for i=1,1000 do
-	c = f:read()
-	syn_list[i] = c:split(",")[1]
-end
 
 local epoch = 1, denet
 if #default_config.reload > 0 then
@@ -44,16 +42,13 @@ if #default_config.reload > 0 then
 else
   print("Building from ResNet...")
   local resnet = torch.load("pretrained/resnet-50.t7")
-  utils.BNtoFixed(resnet, true)
-  resnet:add(nn.SoftMax())
 
   default_config.model = resnet
-  -- Building DeNet
   denet = nn.DecompNet(default_config,default_config.layer)
   default_config.model = None
 end
 -- Loading Trainer
-paths.dofile('TrainerDenet.lua')
+paths.dofile('TrainerDBNet.lua')
 -- paths.dofile("TrainerSharpMask.lua")
 cutorch.setDevice(default_config.gpu2)
 local criterion = nn.SoftMarginCriterion():cuda()
@@ -61,16 +56,13 @@ local trainer = Trainer(denet, criterion, default_config)
 
 print("Loading Data...")
 local DL = paths.dofile('DataLoaderNew.lua')
-local TrainDL = DL.create(default_config)
+local TrainDL, ValDL = DL.create(default_config)
 
---return trainer,TrainDL
-
---trainer,TrainDL = dofile "Neomask/trainDenet.lua"
 epoch=1
 print('| start training')
 for i = 1, 100 do
-  trainer:train_func(epoch,TrainDL)
-  -- print("Validation:")
-  -- if i%2 == 0 then trainer:test(epoch,ValDL) end
+  -- if i%2 == 1 then trainer:test(epoch,ValDL) end
+  trainer:train(epoch,TrainDL)
+
   epoch = epoch + 1
 end

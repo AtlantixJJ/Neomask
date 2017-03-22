@@ -34,6 +34,8 @@ function DataSampler:__init(config,split)
   self.datadir = config.datadir
   self.split = split
 
+  self.classify = config.classify
+
   self.iSz = config.iSz
   self.objSz = math.ceil(config.iSz*128/224)
   self.wSz = config.iSz -- + 32
@@ -49,11 +51,9 @@ function DataSampler:__init(config,split)
   if split == 'train' then self.__size  = config.maxload*config.batch
   elseif split == 'val' then self.__size = config.testmaxload*config.batch end
 
-  if config.hfreq > 0 then
-    self.scales = {} -- scale range for score sampling
-    for scale = -3,2,.25 do table.insert(self.scales,scale) end
-    self:createBBstruct(self.objSz,config.scale)
-  end
+  self.scales = {} -- scale range for score sampling
+  for scale = -3,2,.25 do table.insert(self.scales,scale) end
+  self:createBBstruct(self.objSz,config.scale)
 
   collectgarbage()
 end
@@ -109,8 +109,10 @@ function DataSampler:get(headSampling)
   local input,label
   if headSampling == 1 then -- sample masks
     input, label = self:maskSampling()
-  else -- sample score
-    input,label = self:scoreSampling()
+  elseif headSampling == 2 then -- sample score
+    input, label = self:scoreSampling()
+  elseif headSampling == 3 then
+    input, label = self:classSampling()
   end
 
   if torch.uniform() > .5 then
@@ -124,12 +126,42 @@ function DataSampler:get(headSampling)
   return input,label
 end
 
+-- if set config.classify then do class sampling 
+function DataSampler:classSampling()
+  local iSz,wSz,gSz = self.iSz,self.wSz,self.gSz
+
+  local cat,ann = torch.random(80)
+  -- bbox argument : x,y,w,h
+  while not ann or ann.iscrowd == 1 or ann.area < 100 or ann.bbox[3] < 5
+    or ann.bbox[4] < 5 do
+      local catId = self.catIds[cat]
+      local annIds = self.coco:getAnnIds({catId=catId})
+      local annid = annIds[torch.random(annIds:size(1))]
+      ann = self.coco:loadAnns(annid)[1]
+  end
+
+  local bbox = self:jitterBox(ann.bbox)
+  local imgName = self.coco:loadImgs(ann.image_id)[1].file_name
+
+  -- input
+  local pathImg = string.format('%s/%s2014/%s',self.datadir,self.split,imgName)
+  local inp = image.load(pathImg,3)
+  local h, w = inp:size(2), inp:size(3)
+  inp = self:cropTensor(inp, bbox, 0.5)
+  inp = image.scale(inp, wSz, wSz)
+
+  local lbl = torch.Tensor(1)
+  lbl[1] = self.catIds[cat]
+  return inp, lbl
+end
+
 --------------------------------------------------------------------------------
 -- function: mask sampling
 function DataSampler:maskSampling()
   local iSz,wSz,gSz = self.iSz,self.wSz,self.gSz
 
   local cat,ann = torch.random(80)
+  -- bbox argument : x,y,w,h
   while not ann or ann.iscrowd == 1 or ann.area < 100 or ann.bbox[3] < 5
     or ann.bbox[4] < 5 do
       local catId = self.catIds[cat]

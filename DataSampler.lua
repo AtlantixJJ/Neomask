@@ -48,7 +48,6 @@ function DataSampler:__init(config,split)
 
   if split == 'train' then self.__size  = config.maxload*config.batch
   elseif split == 'val' then self.__size = config.testmaxload*config.batch end
-
   if config.hfreq > 0 then
     self.scales = {} -- scale range for score sampling
     for scale = -3,2,.25 do table.insert(self.scales,scale) end

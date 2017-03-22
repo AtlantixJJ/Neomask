@@ -52,6 +52,56 @@ end
 
 --------------------------------------------------------------------------------
 -- function: run
+function DataLoader:run_class_only()
+  print("Sampling Classification Only!")
+  local threads = self.threads
+  local size, batch = self.__size, self.batch
+
+  local idx, sample = 1, nil
+  local function enqueue()
+    while idx <= size and threads:acceptsjob() do
+      local bsz = math.min(batch, size - idx + 1)
+      threads:addjob(
+        function(bsz, hfreq)
+          local inputs, labels
+          local head = 3-- head sampling
+          
+          for i = 1, bsz do  
+            local input, label = _G.ds:get(head)
+            if not inputs then
+              local iSz = input:size():totable()
+              local mSz = label:size():totable()
+              inputs = torch.FloatTensor(bsz, table.unpack(iSz))
+              labels = torch.FloatTensor(bsz, table.unpack(mSz))
+            end
+            inputs[i]:copy(input)
+            labels[i]:copy(label)
+          end
+          collectgarbage()
+
+          return {inputs = inputs, labels = labels, head = head}
+        end,
+        function(_sample_) sample = _sample_ end,
+        bsz, self.hfreq
+      )
+      idx = idx + batch
+    end
+  end
+
+  local n = 0
+  local function loop()
+    enqueue()
+    if not threads:hasjob() then return nil end
+    threads:dojob()
+    if threads:haserror() then threads:synchronize() end
+    enqueue()
+    n = n + 1
+    return n, sample
+  end
+
+  return loop
+end
+
 function DataLoader:run()
   local threads = self.threads
   local size, batch = self.__size, self.batch
@@ -63,10 +113,10 @@ function DataLoader:run()
       threads:addjob(
         function(bsz, hfreq)
           local inputs, labels
-          local head -- head sampling
-          if torch.uniform() > hfreq then head = 1 else head = 2 end
-
+          local head = 0-- head sampling
+          while head <= 0 or head > 3 do head = torch.floor((torch.uniform()-0.0001) * 3) + 1 end
           for i = 1, bsz do
+            
             local input, label = _G.ds:get(head)
             if not inputs then
               local iSz = input:size():totable()

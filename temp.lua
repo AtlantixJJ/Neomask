@@ -8,7 +8,7 @@ require 'image'
 
 paths.dofile('myutils.lua')
 paths.dofile("model.lua")
-local default_config = paths.dofile('getconfig.lua')
+default_config = paths.dofile('getconfig.lua')
 local utils = paths.dofile('modelUtils.lua')
 
 -- set GPU
@@ -23,10 +23,8 @@ for i=1,1000 do
 	syn_list[i] = c:split(",")[1]
 end
 
-
-print("Loading Data...")
-local DL = paths.dofile('DataLoaderNew.lua')
-local TrainDL, ValDL = DL.create(default_config)
+DataLoader = dofile("Neomask/DataLoaderNew.lua")
+trainLoader, valLoader = DataLoader.create(default_config)
 
 print("Running...")
 function run_dataset(DL,s)
@@ -45,16 +43,13 @@ function run_dataset(DL,s)
 	return data
 end
 
-local data = run_dataset(TrainDL,20)
-
+data = run_dataset(trainLoader,20)
 im = data[1].inputs
 masks = data[1].labels
-for i=1,im:size(1) do
-	show_mask(im[i],masks[{{i}}],"mask"..i)
-end
+cutorch.setDevice(default_config.gpu)
+ins = im:cuda():clone()
 
 
-return data
 --[[
 im = torch.CudaTensor()
 im:resize(data[1].inputs:size()):copy(data[1].inputs)
@@ -90,8 +85,9 @@ for i=1,5 do
 	print("Distance of 1-hot and full : %.2f" % torch.dist(rd[i],rf[i]))
 end
 ]]--
+
+--[[
 require 'tds'
-pt = torch.load("./props-1-500.t7" )
 coco = require 'coco'
 cfile = coco.CocoApi("/home/atlantix/COCO/COCO/data/annotations/instances_val2014.json")
 
@@ -104,3 +100,4 @@ function eval(item)
 	local annId = cfile:getAnnIds(imgId)
 	return cfile:loadAnns(annId)
 end
+]]

@@ -27,6 +27,7 @@ function DecompNet:build_extra()
     self.gradFit = self.gradFit:cuda()
 end
 
+
 function DecompNet:__init(config)
     print("BaseLine Model From Layer 6. Forward-Backward Combined.")
     self.gpu1 = config.gpu1
@@ -34,6 +35,7 @@ function DecompNet:__init(config)
 
     cutorch.setDevice(self.gpu1)
     self.M = config.model:cuda()
+
     self.config = config
     self.name = config.name
 
