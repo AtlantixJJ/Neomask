@@ -1,5 +1,6 @@
+
 --[[
-    Forward and backward combined.
+    This model is used to figure out which layer is more suitable for masking
 ]]--
 
 require 'nn'
@@ -11,7 +12,7 @@ require 'cutorch'
 local DecompNet,_ = torch.class("nn.DecompNet",'nn.Container')
 
 function DecompNet:__init(config,layer)
-    print("Decomp BaseNet from layer %d . Forward-Backward Combined. Naive." % layer)
+    print("Decomp BaseNet from layer %d . Backward Only. No droupout. Naive." % layer)
     self.gpu1 = config.gpu1
     self.gpu2 = config.gpu2
     self.layer = layer
@@ -32,7 +33,6 @@ function DecompNet:__init(config,layer)
         -- 1024,8,8
         self.M:add(cudnn.SpatialAveragePooling(7, 7, 1, 1) ) -- same
         self.M:add(nn.View(2048))
-        self.M:add(nn.Dropout(0.5)) -- there is no dropout in origin resnet
         self.M:add(nn.Linear(2048,90)) -- original resnet is 2048 -> 1000
         self.M = self.M:cuda()
         collectgarbage()
@@ -55,52 +55,17 @@ function DecompNet:__init(config,layer)
     self.scoreNet = nn.Sequential():add(self.gradFit):add(self.scoreBranch)
 end
 
-function DecompNet:precheck()
-    local tempin = torch.rand(1,3,224,224):cuda()
-    self.M:training()
-    local temp = self.M:forward(tempin)
-    self.M:backward(tempin,temp)
-    self.in_size = self.M.modules[1].gradInput:size(3)
-    self.from_size = self.M.modules[self.layer].gradInput:size(3)
-    self.from_nfeat = self.M.modules[self.layer].gradInput:size(2)
-    self.scale = self.config.gSz / self.config.oSz 
-
-    print("Pre-check :")
-    print("Main Module output : ")
-    print(temp:size())
-    print("Relevance Origin : (%d,%d) " % {self.from_nfeat,self.from_size})
-    print("Scale factor  %d " % self.scale)
-end
-
--- tail is used for clearing ups
-function DecompNet:build_tail()
-    -- scale up to input
-    print("Scale %d : %d -> %d" % {self.scale, self.in_size, self.from_size})
-
-    self.tail = nn.Sequential()
-
-    self.tail:add(nn.SpatialUpSamplingBilinear(self.scale))
-    -- need to convert to 1-d tensor to take in margin loss
-    self.tail:add(nn.View(self.config.batch,self.config.oSz,self.config.oSz))
-
-    self.tail = self.tail:cuda()
-end
-
 function DecompNet:build_maskBranch()
   print("Output raw size : %d" % self.from_size)
   local maskBranch = nn.Sequential()
-  
-  maskBranch:add(nn.Dropout(0.5))
-  maskBranch:add(nn.Linear(512,self.config.oSz*self.config.oSz))
-  maskBranch:add(nn.View(self.config.batch, self.config.oSz, self.config.oSz))
-
+  maskBranch:add(nn.Linear(512,56*56))
+  maskBranch:add(nn.View(self.config.batch, 56, 56))
   self:build_tail()
   self.maskBranch = nn.Sequential():add(maskBranch:cuda()):add(self.tail)
 end
 
 function DecompNet:build_scoreBranch()
   local scoreBranch = nn.Sequential()
-
   scoreBranch:add(nn.Dropout(.5))
   scoreBranch:add(nn.Linear(512,1024))
   scoreBranch:add(nn.Threshold(0, 1e-6))
@@ -112,45 +77,60 @@ function DecompNet:build_scoreBranch()
   return self.scoreBranch
 end
 
+function DecompNet:precheck()
+    local tempin = torch.rand(1,3,224,224):cuda()
+    local temp = self.M:forward(tempin)
+    self.M:backward(tempin,temp)
+    self.in_size = self.M.modules[1].gradInput:size(3)
+    self.from_size = self.M.modules[self.layer].gradInput:size(3)
+    self.from_nfeat = self.M.modules[self.layer].gradInput:size(2)
+    self.scale = self.in_size / self.from_size 
+end
+
+-- tail is used for clearing ups
+function DecompNet:build_tail()
+    -- scale up to input
+    print("Scale %d : %d -> %d" % {4, self.in_size, self.from_size})
+
+    self.tail = nn.Sequential()
+
+    self.tail:add(nn.SpatialUpSamplingBilinear(4))
+    -- need to convert to 1-d tensor to take in margin loss
+    self.tail:add(nn.View(self.config.batch,56,56))
+
+    self.tail = self.tail:cuda()
+end
+
 -- extra layers to relevance output
 function DecompNet:build_extra()
-    print("FingerPrint : blgx_fbc")
     self.gradFit = nn.Sequential()
-    local forward_feat = nn.Sequential()
-    local backward_feat = nn.Sequential()
 
-    print("Top feature number : %d " % self.fs)
-
-    forward_feat:add(cudnn.SpatialConvolution(self.from_nfeat,self.fs,1,1,1,1))
-    forward_feat:add(nn.SpatialBatchNormalization(self.fs))
-    forward_feat:add(cudnn.ReLU())
-
-    backward_feat:add(cudnn.SpatialConvolution(self.from_nfeat,self.fs,1,1,1,1))
-    backward_feat:add(nn.SpatialBatchNormalization(self.fs))
-    backward_feat:add(cudnn.ReLU())
-
-    self.gradFit:add(nn.ParallelTable():add(forward_feat):add(backward_feat))
-    self.gradFit:add(nn.JoinTable(2)) -- join at (batch,x,256,256)
-
-    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
-    self.gradFit:add(cudnn.SpatialConvolution(2*self.fs,self.fs/2,self.ks,self.ks,1,1))
-    self.gradFit:add(nn.SpatialBatchNormalization(self.fs/2))
+    self.gradFit:add(cudnn.SpatialConvolution(self.from_nfeat,64,1,1,1,1))
     self.gradFit:add(cudnn.ReLU())
 
-    self.gradFit:add(nn.View(self.config.batch,self.fs/2*self.from_size*self.from_size))
+    self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
+    self.gradFit:add(cudnn.SpatialConvolution(64,16,self.ks,self.ks,1,1))
+    self.gradFit:add(cudnn.ReLU())
+
+    self.gradFit:add(nn.View(self.config.batch,16*self.from_size*self.from_size))
     self.gradFit:add(nn.Dropout(.5))
-    self.gradFit:add(nn.Linear(self.fs/2*self.from_size*self.from_size,512))
+    self.gradFit:add(nn.Linear(16*self.from_size*self.from_size,512))
     self.gradFit:add(cudnn.ReLU())
 
     self.gradFit = self.gradFit:cuda()
 end
 
+function DecompNet:test_forward(input_batch,layer)
 
-function DecompNet:forward(input_batch,head)
+end
+
+function DecompNet:forward(input_batch,head,train)
     -- input_batch should be CudaTensor in gpu1
     cutorch.setDevice(self.gpu1)
     self.inputs = input_batch
-    local pre = self.M:forward(self.inputs):clone()
+    -- to evaluate
+    if train == false then self.M:evaluate() end
+    local pre = self.M:forward(self.inputs)
 
     if head == 3 then
         self.output = pre
@@ -159,9 +139,10 @@ function DecompNet:forward(input_batch,head)
 
     local N = #self.M.modules
     local D = N - self.layer + 1
-    pre = self.softmax:forward(pre) * 10
+    pre = pre * 100
     self.M:zeroGradParameters()
 
+    if train == false then self.M:training() end
     for i=1,D do
         if N == i then
             pre = self.M.modules[N-i+1]:backward(self.inputs, pre)
@@ -170,11 +151,9 @@ function DecompNet:forward(input_batch,head)
         end
     end
 
-    --- build refine input
+    -- Build refine input
     cutorch.setDevice(self.gpu2)
-    ------- this is the difference from Backward Only models
-    self.ss_in = {self.M.modules[self.layer-1].output,self.M.modules[self.layer].gradInput}
-    --------
+    self.ss_in = self.M.modules[self.layer].gradInput:clone()
 
     self.common_in = self.gradFit:forward(self.ss_in) -- :clone()
 
@@ -198,9 +177,9 @@ function DecompNet:backward(input_batch,gradInput,head)
     cutorch.setDevice(self.gpu2)
     
     if head == 1 then
-        gradIn = self.maskBranch:backward(self.common_in, gradInput)
+        gradIn = self.maskNet:backward(self.common_in, gradInput)
     elseif head == 2 then
-        gradIn = self.scoreBranch:backward(self.common_in, gradInput)
+        gradIn = self.scoreNet:backward(self.common_in, gradInput)
     end
     self.gradFitin = self.gradFit:backward(self.ss_in, gradIn) -- :clone()
     -- fdself.gradResin = self.M:backward(input_batch,self.gradFitin)
@@ -234,33 +213,19 @@ function DecompNet:zeroGradParameters()
 end
 
 function DecompNet:updateParameters(lr,head)
-    if head == 3 then
-        cutorch.setDevice(self.gpu1)
-        self.M:updateParameters(lr)
-        print("Upd 3")
-        return 3
-    end
-    
+    -- self.M:updateParameters(lr)
     cutorch.setDevice(self.gpu2)
     self.gradFit:updateParameters(lr)
-    if head == 1 then
-        self.maskBranch:updateParameters(lr)
-        return 1
-    elseif head == 2 then
-        self.scoreBranch:updateParameters(lr)
-        return 2
-    end
+    self.maskBranch:updateParameters(lr)
+    self.scoreBranch:updateParameters(lr)
 end
 
 function DecompNet:getParameters(head)
     if head == 3 then
-        print("Giving Trunk Parameters")
         return self.M:getParameters()
     elseif head == 1 then
-        print("Giving MaskBranch Parameters")
         return self.maskNet:getParameters()
     elseif head == 2 then
-        print("Giving ScoreBranch Parameters")
         return self.scoreNet:getParameters()
     end
 end

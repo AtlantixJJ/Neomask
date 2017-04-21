@@ -8,11 +8,11 @@ require 'image'
 
 paths.dofile('myutils.lua')
 
-local select_model = "blgx_bnaive.lua" -- "blg6fbc.lua" -- "blg6fbcnaive.lua" -- -- "blg6naive.lua" -- "model.lua"
+local select_model ="class_model.lua" -- "blgx_bnaive.lua" -- "blg6fbc.lua" -- "blg6fbcnaive.lua" -- -- "blg6naive.lua" -- "model.lua"
 paths.dofile(select_model)
 
 local default_config = paths.dofile('getconfig.lua')
-
+default_config.reload = "model/CLON"
 local utils = paths.dofile('modelUtils.lua')
 
 -- set GPU
@@ -44,8 +44,6 @@ if #default_config.reload > 0 then
 else
   print("Building from ResNet...")
   local resnet = torch.load("pretrained/resnet-50.t7")
-  utils.BNtoFixed(resnet, true)
-  resnet:add(nn.SoftMax())
 
   default_config.model = resnet
   -- Building DeNet
@@ -53,24 +51,26 @@ else
   default_config.model = None
 end
 -- Loading Trainer
-paths.dofile('TrainerDenet.lua')
+-- paths.dofile('TrainerDenet.lua')
 -- paths.dofile("TrainerSharpMask.lua")
+paths.dofile("TrainerClassification.lua")
 cutorch.setDevice(default_config.gpu2)
 local criterion = nn.SoftMarginCriterion():cuda()
 local trainer = Trainer(denet, criterion, default_config)
 
 print("Loading Data...")
 local DL = paths.dofile('DataLoaderNew.lua')
-local TrainDL = DL.create(default_config)
+local TrainDL,ValDL = DL.create(default_config)
 
---return trainer,TrainDL
 
---trainer,TrainDL = dofile "Neomask/trainDenet.lua"
-epoch=1
+
+epoch=31
 print('| start training')
 for i = 1, 100 do
-  trainer:train_func(epoch,TrainDL)
+  
+  trainer:train(epoch,TrainDL)
+  if i%2 == 0 then trainer:test(epoch,ValDL) end
   -- print("Validation:")
-  -- if i%2 == 0 then trainer:test(epoch,ValDL) end
+  
   epoch = epoch + 1
 end

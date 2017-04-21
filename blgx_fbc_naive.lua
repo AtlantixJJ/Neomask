@@ -24,18 +24,23 @@ function DecompNet:__init(config,layer)
     self.fs = 64
 
     cutorch.setDevice(self.gpu1)
-
-    -- the preset model cannot be cuda model
-    self.M = config.model
-    self.M:remove();self.M:remove();self.M:remove();
-    -- if 4-remove, then start size is 1024,14,14
-    -- 1024,8,8
-    self.M:add(cudnn.SpatialAveragePooling(7, 7, 1, 1) ) -- same
-    self.M:add(nn.View(2048))
-    self.M:add(nn.Dropout(0.5)) -- there is no dropout in origin resnet
-    self.M:add(nn.Linear(2048,90)) -- original resnet is 2048 -> 1000
-    self.M = self.M:cuda()
-    collectgarbage()
+    if #config.trans_model == 0 then
+        -- the resnet model cannot be cuda model
+        self.M = config.model
+        self.M:remove();self.M:remove();self.M:remove();
+        -- if 4-remove, then start size is 1024,14,14
+        -- 1024,8,8
+        self.M:add(cudnn.SpatialAveragePooling(7, 7, 1, 1) ) -- same
+        self.M:add(nn.View(2048))
+        self.M:add(nn.Dropout(0.5)) -- there is no dropout in origin resnet
+        self.M:add(nn.Linear(2048,90)) -- original resnet is 2048 -> 1000
+        self.M = self.M:cuda()
+        collectgarbage()
+    else
+        print("Using Transfer Trained Model...")
+        self.M = config.model:cuda()
+        self.softmax = nn.SoftMax():cuda()
+    end
 
     -- pre-running to determine shapes
     self:precheck()
@@ -96,14 +101,6 @@ end
 function DecompNet:build_scoreBranch()
   local scoreBranch = nn.Sequential()
 
-  scoreBranch:add(nn.SpatialZeroPadding(self.pd,self.pd))
-  scoreBranch:add(cudnn.SpatialConvolution(self.fs/4,4,self.ks,self.ks,1,1))
-  scoreBranch:add(cudnn.ReLU())
-
-  scoreBranch:add(nn.View(self.config.batch,4*self.from_size*self.from_size))
-  scoreBranch:add(nn.Linear(4*self.from_size*self.from_size,512))
-  scoreBranch:add(cudnn.ReLU())
-
   scoreBranch:add(nn.Dropout(.5))
   scoreBranch:add(nn.Linear(512,1024))
   scoreBranch:add(nn.Threshold(0, 1e-6))
@@ -149,11 +146,12 @@ function DecompNet:build_extra()
 end
 
 
-function DecompNet:forward(input_batch,head)
+function DecompNet:forward(input_batch,head,train)
     -- input_batch should be CudaTensor in gpu1
     cutorch.setDevice(self.gpu1)
     self.inputs = input_batch
-    local pre = self.M:forward(self.inputs)
+    if train == false then self.M:evaluate() end
+    local pre = self.M:forward(self.inputs):clone()
 
     if head == 3 then
         self.output = pre
@@ -162,9 +160,10 @@ function DecompNet:forward(input_batch,head)
 
     local N = #self.M.modules
     local D = N - self.layer + 1
-    pre = pre * 100
+    pre = self.softmax:forward(pre) * 10
     self.M:zeroGradParameters()
 
+    if train == false then self.M:training() end
     for i=1,D do
         if N == i then
             pre = self.M.modules[N-i+1]:backward(self.inputs, pre)
@@ -176,7 +175,7 @@ function DecompNet:forward(input_batch,head)
     --- build refine input
     cutorch.setDevice(self.gpu2)
     ------- this is the difference from Backward Only models
-    self.ss_in = {self.M.modules[self.layer-1].output:clone(),self.M.modules[self.layer].gradInput:clone()}
+    self.ss_in = {self.M.modules[self.layer-1].output,self.M.modules[self.layer].gradInput}
     --------
 
     self.common_in = self.gradFit:forward(self.ss_in) -- :clone()
@@ -257,10 +256,13 @@ end
 
 function DecompNet:getParameters(head)
     if head == 3 then
+        print("Giving Trunk Parameters")
         return self.M:getParameters()
     elseif head == 1 then
+        print("Giving MaskBranch Parameters")
         return self.maskNet:getParameters()
     elseif head == 2 then
+        print("Giving ScoreBranch Parameters")
         return self.scoreNet:getParameters()
     end
 end

@@ -7,20 +7,23 @@ require 'cutorch'
 require 'image'
 require 'gnuplot'
 
+paths.dofile('SpatialSymmetricPadding.lua')
 paths.dofile('myutils.lua')
 
-local select_model = "DeepMask.lua" --blg6fbc.lua" -- "model.lua"
+local select_model = "blgx_fbc_naive.lua" -- "class_model.lua" -- "blg6_f32_conv3.lua" "SharpMask.lua" --blg6fbc.lua" -- "model.lua"
 paths.dofile(select_model)
 
 local default_config = paths.dofile('getconfig.lua')
-default_config.reload = "model/DMT/"
+default_config.reload = "model/CLEN/G6_FBC_Naive"-- "model/BL_G6_f32_Norm/"
 local utils = paths.dofile('modelUtils.lua')
 
 -- set GPU
-default_config.gpu = 3
+default_config.gpu = 4
+default_config.batch = 8
 default_config.gpu2 = default_config.gpu
 default_config.gpu1 = default_config.gpu
 
+print("Reload from %s" % default_config.reload)
 print("Using GPU %d" % default_config.gpu)
 cutorch.setDevice(default_config.gpu)
 
@@ -57,14 +60,17 @@ else
 end
 
 local DataLoader = paths.dofile("DataLoaderNew.lua")
-local trainLoader, valLoader = DataLoader.create(config)
+-- Sharpmask need old version : 192
+-- local DataLoader = paths.dofile("DataLoader.lua")
+trainLoader, valLoader = DataLoader.create(default_config)
 
 print("Running...")
+-- sample head 1 only
 function run_dataset(DL,s)
 	local cnt = 0
 	local data = {}
 	for n, sample in DL:run() do
-		if sample ~= nil then
+		if sample ~= nil and sample.head==1 then
 			cnt = cnt + 1
 			data[cnt] = sample
 		end
@@ -82,13 +88,37 @@ masks = data[1].labels
 cutorch.setDevice(default_config.gpu)
 ins = im:cuda():clone()
 
+-- normal prediction
+mask = denet:forward(ins)
+
+------ for relevance prediction
+-- pred = denet:forward(ins)
+--- for relevance
+--[[
+pred,wd = denet:relevance_visualize(ins[1])
+pred = pred:reshape(pred:size(1), 224, 224)
+wd = wd:reshape(wd:size(1), 224, 224)
+for i=1,32 do
+  save_pred(im[i],{pred[i],wd[i]},"res/releclass_vis_"..i..".png",1)
+end
+]]--
+
 ----- for deepmask
-
+--[[
 mask,score = denet:predict_m(ins)
-mask = mask:reshape(mask:size(1),112,112)
-
-print(mask:size(),score:size())
-
+mask = mask:reshape(mask:size(1),224,224)
 for i=1,32 do
   save_pred(image.scale(im[i],112),{mask[i]},"res/dm"..i..score[i][1]..".png",1)
 end
+]]--
+
+--------- for Sharpmask
+--[[
+mask = denet:forward(ins)
+mask = mask:reshape(32,1,160,160)
+print(mask:size(),im:size()) -- 160,160 | 192,192
+
+for i=1,32 do
+  save_pred(im[i],{image.scale(mask[i]:float(),192)},"res/sm"..i..".png",3)
+end
+]]--

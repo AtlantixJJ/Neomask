@@ -46,6 +46,12 @@ function norm_proc(raw,mode)
             pred = (pred-pred:min())/(pred:max()-pred:min())
         end
         print(pred:min(),pred:max())
+    elseif mode == 4 then -- to gray
+        pred[ torch.le(pred,-1) ] = -1
+        pred[ torch.le(-pred,-1)] = 1
+        if pred:max() ~= pred:min() then
+            pred = (pred-pred:min())/(pred:max()-pred:min())
+        end
     end
     return pred
 end
