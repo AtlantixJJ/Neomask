@@ -16,7 +16,8 @@ default_config.layer = 6
 print("Classification Mode...")
 default_config.classify = true
 
-local select_model = "blgx_bnaive.lua" -- "blgx_fbc_naive.lua" -- "class_model.lua"
+local select_model = default_config.modeldef
+print("Choose model : %s" % {select_model})
 paths.dofile(select_model)
 
 local utils = paths.dofile('modelUtils.lua')
@@ -39,6 +40,7 @@ if #default_config.reload > 0 then
   print(string.format('| reloading experiment %s', default_config.reload))
   local m = torch.load(string.format('%s/model.t7', default_config.reload))
   denet, config = m.model, m.config
+
 elseif #default_config.trans_model == 0 then
   print("Building from ResNet...")
   local resnet = torch.load("pretrained/resnet-50.t7")
@@ -46,6 +48,7 @@ elseif #default_config.trans_model == 0 then
   default_config.model = resnet
   denet = nn.DecompNet(default_config,default_config.layer)
   default_config.model = None
+
 else
   print("Building from transfer learned model...")
   if paths.filep(default_config.trans_model..'/log') then
@@ -62,7 +65,6 @@ end
 
 -- Loading Trainer
 paths.dofile('TrainerDBNet.lua')
--- paths.dofile("TrainerSharpMask.lua")
 cutorch.setDevice(default_config.gpu2)
 local criterion = nn.SoftMarginCriterion():cuda()
 local trainer = Trainer(denet, criterion, default_config)

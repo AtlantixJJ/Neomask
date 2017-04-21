@@ -11,7 +11,7 @@ require 'cutorch'
 local DecompNet,_ = torch.class("nn.DecompNet",'nn.Container')
 
 function DecompNet:__init(config,layer)
-    print("Decomp BaseNet from layer %d ." % layer)
+    print("Decomp BaseNet from layer %d . Backward Only. Naive." % layer)
     self.gpu1 = config.gpu1
     self.gpu2 = config.gpu2
     self.layer = layer
@@ -35,6 +35,7 @@ function DecompNet:__init(config,layer)
         self.M:add(nn.Dropout(0.5)) -- there is no dropout in origin resnet
         self.M:add(nn.Linear(2048,90)) -- original resnet is 2048 -> 1000
         self.M = self.M:cuda()
+        collectgarbage()
     else
         print("Using Transfer Trained Model...")
         self.M = config.model:cuda()
@@ -42,7 +43,6 @@ function DecompNet:__init(config,layer)
         self.trunk = self.M[{{1,self.layer}}]
         self.softmax = nn.SoftMax():cuda()
     end
-    collectgarbage()
 
     -- pre-running to determine shapes
     self:precheck()
