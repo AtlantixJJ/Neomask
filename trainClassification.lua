@@ -12,7 +12,6 @@ local select_model ="class_model.lua" -- "blgx_bnaive.lua" -- "blg6fbc.lua" -- "
 paths.dofile(select_model)
 
 local default_config = paths.dofile('getconfig.lua')
-default_config.reload = "model/CLON"
 local utils = paths.dofile('modelUtils.lua')
 
 -- set GPU
@@ -50,13 +49,10 @@ else
   denet = nn.DecompNet(default_config,default_config.layer)
   default_config.model = None
 end
--- Loading Trainer
--- paths.dofile('TrainerDenet.lua')
--- paths.dofile("TrainerSharpMask.lua")
+
 paths.dofile("TrainerClassification.lua")
 cutorch.setDevice(default_config.gpu2)
-local criterion = nn.SoftMarginCriterion():cuda()
-local trainer = Trainer(denet, criterion, default_config)
+local trainer = Trainer(denet, default_config)
 
 print("Loading Data...")
 local DL = paths.dofile('DataLoaderNew.lua')

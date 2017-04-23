@@ -1,1 +1,0 @@
-scp /Users/xujianjin/torch/install/share/lua/5.1/nn/Dropout.lua atlantix@166.111.17.46:torch/install/share/lua/5.2/nn/

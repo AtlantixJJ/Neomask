@@ -52,8 +52,8 @@ end
 
 --------------------------------------------------------------------------------
 -- function: run
-function DataLoader:run_class_only()
-  print("Sampling Classification Only!")
+function DataLoader:run_class()
+  print("Sampling Classification and Score Only!")
   local threads = self.threads
   local size, batch = self.__size, self.batch
 
@@ -64,7 +64,7 @@ function DataLoader:run_class_only()
       threads:addjob(
         function(bsz, hfreq)
           local inputs, labels
-          local head = 3-- head sampling
+          if torch.uniform() > hfreq then head = 2 else head = 3 end
           
           for i = 1, bsz do  
             local input, label = _G.ds:get(head)

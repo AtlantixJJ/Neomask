@@ -15,7 +15,7 @@ local Trainer = torch.class('Trainer')
 
 --------------------------------------------------------------------------------
 -- function: init
-function Trainer:__init(model, criterion, config)
+function Trainer:__init(model, config)
   -- training params
   self.config = config
   self.debug = config.debug
@@ -23,7 +23,7 @@ function Trainer:__init(model, criterion, config)
   if self.config.fix == true then print("FIXED!") end
   self.model = model
 
-  self.criterion = criterion
+  self.criterion = nn.SoftMarginCriterion():cuda()
   self.criterion_class = nn.CrossEntropyCriterion():cuda()
   self.lr = config.lr
   self.optimState ={}
@@ -37,8 +37,9 @@ function Trainer:__init(model, criterion, config)
     }
   end
 
+  -- parameter / gradient
   self.pt,self.gt = self.model:getParameters(3);collectgarbage()
-  
+  self.ps,self.gs = self.model:getParameters(2);collectgarbage()
 
   -- allocate cuda tensors
   self.inputs, self.labels = torch.CudaTensor(), torch.CudaTensor()
@@ -47,6 +48,7 @@ function Trainer:__init(model, criterion, config)
   self.lossmeter  = LossMeter()
   self.maskmeter  = IouMeter(0.5,config.testmaxload*config.batch)
   self.scoremeter = BinaryMeter()
+  self.LM ={LossMeter(),LossMeter(),LossMeter()}
 
   -- log
   self.modelsv = {model=model:clone('weight', 'bias'),config=config}
@@ -73,29 +75,42 @@ function Trainer:train(epoch, dataloader)
     print("Using Full Parameters")
     self.pt,self.gt = self.model:getParameters(1)
   end
-  local fevalclass = function()  return self.criterion_class.output,   self.gt end
+
+  local fevalclass = function() return self.criterion_class.output,   self.gt end
+  local fevalscore = function() return self.criterion.output,         self.gs end
+  local feval
+
   local lossum = 0
-  for n, sample in dataloader:run_class_only() do
+  for n, sample in dataloader:run_class() do
     if self.debug and n > 100 then break end
     if sample ~= nil then
       -- copy samples to the GPU
       self:copySamples(sample)
       -- forward/backward
 
-      local outputs = self.model:forward(self.inputs)
+      local outputs = self.model:forward(self.inputs,sample.head)
       local lossbatch, gradOutputs
-      lossbatch = self.criterion_class:forward(outputs, self.labels)
+
+      if sample.head == 2 then --score
+        lossbatch = self.criterion:forward(outputs, self.labels)
+        gradOutputs = self.criterion:backward(outputs, self.labels)
+        feval = fevalclass
+      elseif sample.head == 3 then --class
+        lossbatch = self.criterion_class:forward(outputs, self.labels)
+        gradOutputs = self.criterion_class:backward(outputs, self.labels)
+        feval = fevalscore
+      end
 
       if lossbatch < 10 then
         lossum = lossum + lossbatch
         self.model:zeroGradParameters()
-        gradOutputs = self.criterion_class:backward(outputs, self.labels)
         self.model:backward(self.inputs, gradOutputs)
-        optim.sgd(fevalclass, self.pt, self.optimState.trunk)
+        optim.sgd(feval, self.pt, self.optimState.trunk)
         -- update loss
-        self.lossmeter:add(lossbatch)
+        self.LM[sample.head]:add(lossbatch)
+        if self.debug then print(lossbatch) end
         if n % 100 == 0 then 
-          print("Iter %d Loss %.3f" % {n, lossum/100.})
+          print("Iter %d\tLoss(Score) %.3f\tLoss(Acc) %.3f" % {n, self.LM[2]:value(), self.LM[3]:value()})
           lossum = 0
         end
       else
@@ -131,26 +146,34 @@ function Trainer:test(epoch, dataloader)
   print("testing")
   self.model:evaluate()
   self.maxacc = self.maxacc or 0
-
+  self.maskmeter:reset()
+  self.scoremeter:reset()
+  self.lossmeter:reset()
   local cnt = 0
   local tot = 0
 
-  for n, sample in dataloader:run_class_only() do
+  for n, sample in dataloader:run_class() do
     -- copy input and target to the GPU
     if self.debug and n > 100 then break end
     if sample ~= nil then
       self:copySamples(sample)
+      if self.debug then print(sample) end
 
-      local outputs = self.model:forward(self.inputs)
-      conf, ind = torch.max(outputs,2) -- take maximium along axis 2
-      ind = ind:int()
-      lbl = self.labels:int()
+      if sample.head == 2 then
+        local outputs = self.model:forward(self.inputs, sample.head)
+        self.scoremeter:add(outputs, self.labels)
+      elseif sample.head == 3 then
+        local outputs = self.model:forward(self.inputs, sample.head)
+        local conf, ind = torch.max(outputs,2) -- take maximium along axis 2
+        ind = ind:int()
+        lbl = self.labels:int()
 
-      cnt = cnt + torch.eq(lbl,ind):sum()
-      tot = tot + self.labels:size(1)
-      cutorch.synchronize()
+        cnt = cnt + torch.eq(lbl,ind):sum()
+        tot = tot + self.labels:size(1)
+      end
     end
   end
+
   self.model:training()
 
   -- check if bestmodel so far

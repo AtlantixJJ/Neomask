@@ -31,12 +31,13 @@ function DecompNet:__init(config,layer)
     -- if 4-remove, then start size is 1024,14,14
     -- 1024,8,8
     self.class = nn.Sequential()
-    self.class:add(cudnn.SpatialAveragePooling(7, 7, 1, 1) ) -- same
-    self.class:add(nn.View(2048))
-    self.class:add(nn.Dropout(0.5)) -- there is no dropout in origin resnet
-    self.class:add(nn.Linear(2048,90)) -- original resnet is 2048 -> 1000
-    self.M:add(self.class)
-    self.M = self.M:cuda()
+    self.M:add(cudnn.SpatialAveragePooling(7, 7, 1, 1) ) -- same
+    self.M:add(nn.View(2048))
+    self.M=self.M:cuda()
+    self.scoreBranch = nn.Linear(2048,1):cuda()
+    self.classBranch = nn.Linear(2048,90):cuda()
+    self.classNet = nn.Sequential():add(self.M):add(self.scoreBranch)
+    self.scoreNet = nn.Sequential():add(self.M):add(self.classBranch)
 
     collectgarbage()
 
@@ -47,9 +48,9 @@ end
 
 function DecompNet:precheck()
     local tempin = torch.rand(1,3,224,224):cuda()
-    self.M:training()
-    local temp = self.M:forward(tempin)
-    self.M:backward(tempin,temp)
+    self.classNet:training()
+    local temp = self.classNet:forward(tempin)
+    self.classNet:backward(tempin,temp)
     self.in_size = self.M.modules[1].gradInput:size(3)
     self.from_size = self.M.modules[self.layer].gradInput:size(3)
     self.from_nfeat = self.M.modules[self.layer].gradInput:size(2)
@@ -62,62 +63,70 @@ function DecompNet:precheck()
     print("Scale factor  %d " % self.scale)
 end
 
-function DecompNet:forward(input_batch)
+function DecompNet:forward(input_batch,head)
     -- input_batch should be CudaTensor in gpu1
     cutorch.setDevice(self.gpu1)
     self.inputs = input_batch
     local pre = self.M:forward(self.inputs)
+    if head == 2 then --score
+        self.output = self.scoreBranch:forward(pre)
+    elseif head == 3 then --class
+        self.output = self.classBranch:forward(pre)
+    end
 
-    self.output = pre
     return self.output
 end
 
-function DecompNet:backward(input_batch,gradInput)
+function DecompNet:backward(input_batch,gradInput,head)
     local gradIn
     cutorch.setDevice(self.gpu1)
-    gradIn = self.M:backward(input_batch, gradInput)
+    if head == 2 then
+        gradIn = self.scoreNet:backward(input_batch, gradInput)
+    elseif head == 3 then
+        gradIn = self.classNet:backward(input_batch, gradInput)
+    end
     return gradIn
 end
 
 function DecompNet:relevance_forward(input_batch)
     self.inputs = input_batch
-    local pre = self.M:forward(self.inputs)
+    local pre = self.classNet:forward(self.inputs)
 
     if head == 3 then
         self.output = pre
         return self.output
     end
 
-    local N = #self.M.modules
+    local N = #self.classNet.modules
     local D = N - self.layer + 1
     pre = pre * 100
 
     self.M:zeroGradParameters()
     for i=1,D do
         if N == i then
-            pre = self.M.modules[N-i+1]:backward(self.inputs, pre)
+            pre = self.classNet.modules[N-i+1]:backward(self.inputs, pre)
         else
-            pre = self.M.modules[N-i+1]:backward(self.M.modules[N-i].output, pre)
+            pre = self.classNet.modules[N-i+1]:backward(self.classNet.modules[N-i].output, pre)
         end
     end
 
     wd = pre:clone()
-    rele = torch.cmul(wd, self.M.modules[self.layer-1].output)
+    rele = torch.cmul(wd, self.classNet.modules[self.layer-1].output)
 
     return wd:sum(2), rele:sum(2)
 end
 
 function DecompNet:relevance_visualize(input)
     self.inputs = input
-    local pred = self.M:forward(self.inputs):clone()
+    local pred = self.classNet:forward(self.inputs):clone()
     local softmax = nn.SoftMax():cuda()
     pred = softmax:forward(pred)
     conf,ind = torch.max(pred)
     fwd = pred:clone():zeros()
     fwd[ind[1]]=1
 
-    self.M:zeroGradParameters()
-    self.full_decomp = self.M:backward(input_batch,pred*100)
+    self.classNet:zeroGradParameters()
+    self.full_decomp = self.classNet:backward(input_batch,pred*100)
 
     self.rele = torch.cmul(self.full_decomp,self.inputs)
     return self.rele:sum(2), self.full_decomp:sum(2)
@@ -139,38 +148,47 @@ end
 
 function DecompNet:training()
     cutorch.setDevice(self.gpu1)
-    self.M:training()
+    self.classNet:training()
+    self.scoreNet:training()
 end
 
 function DecompNet:evaluate()
     cutorch.setDevice(self.gpu1)
-    self.M:evaluate()
+    self.classNet:evaluate()
+    self.scoreNet:evaluate()
 end
 
 function DecompNet:zeroGradParameters()
     cutorch.setDevice(self.gpu1)
-    self.M:zeroGradParameters()
+    self.classNet:zeroGradParameters()
+    self.scoreNet:zeroGradParameters()
 end
 
 function DecompNet:updateParameters(lr,head)
     cutorch.setDevice(self.gpu1)
-    self.M:updateParameters(lr)
+    self.classNet:updateParameters(lr)
+    self.scoreNet:updateParameters(lr)
 end
 
 function DecompNet:getParameters(head)
     -- Partial training
-    if head == 3 then 
+    if head == 3 then --head parameters
         print("Giving FT head parameters")
-        return self.class:getParameters()
+        return self.classBranch:getParameters()
+    elseif head == 1 then
+        -- Full training
+        print("Giving Model Full Parameters")
+        return self.classNet:getParameters()
+    elseif head == 2 then --scoreNet
+        print("Giving Score Net parameters")
+        return self.scoreNet:getParameters()
     end
-    -- Full training
-    print("Giving Model Full Parameters")
-    return self.M:getParameters()
 end
 
 function DecompNet:cuda()
     cutorch.setDevice(self.gpu1)
-    self.M:cuda()
+    self.scoreNet:cuda()
+    self.classNet:cuda()
 end
 
 function DecompNet:float()

@@ -129,7 +129,6 @@ function Trainer:train(epoch, dataloader)
   end
 
   local logepoch
-  local 
   -- write log
   logepoch =
     string.format('[train] | epoch %05d | s/batch %04.2f | Mask Loss: %.4f | Score Loss: %.4f | Class Loss: %.4f',
