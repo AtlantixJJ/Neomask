@@ -63,6 +63,7 @@ function Trainer:train(epoch, dataloader)
   self.model:training()
   self:updateScheduler(epoch)
   self.lossmeter:reset()
+  for i=1,3 do self.LM[i]:reset() end
   print("LR:%f"%self.optimState.trunk.learningRate)
 
   local imt
@@ -104,7 +105,7 @@ function Trainer:train(epoch, dataloader)
       if lossbatch < 10 then
         lossum = lossum + lossbatch
         self.model:zeroGradParameters()
-        self.model:backward(self.inputs, gradOutputs)
+        self.model:backward(self.inputs, gradOutputs, sample.head)
         optim.sgd(feval, self.pt, self.optimState.trunk)
         -- update loss
         self.LM[sample.head]:add(lossbatch)
