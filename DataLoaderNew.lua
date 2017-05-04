@@ -64,7 +64,7 @@ function DataLoader:run_class()
       threads:addjob(
         function(bsz, hfreq)
           local inputs, labels
-          if torch.uniform() > hfreq then head = 2 else head = 3 end
+          if torch.uniform() > 0.5 then head = 2 else head = 3 end
           
           for i = 1, bsz do  
             local input, label = _G.ds:get(head)
@@ -102,7 +102,23 @@ function DataLoader:run_class()
   return loop
 end
 
-function DataLoader:run()
+local function head_sampling(ratio)
+  local head = 1-- head sampling
+
+  local RAND_NUM = (torch.uniform()-0.00001) * ratio:sum()
+  for i=1,3 do
+    if ratio[i] <= RAND_NUM and RAND_NUM <= ratio[i+1] then 
+      head = i
+    end
+  end
+  return head
+end
+
+function DataLoader:run(ratio)
+  if ratio == nil then ratio = torch.ones(4); ratio[1] = 0 end
+  for i=2,4 do
+    ratio[i] = ratio[i] + ratio[i-1]
+  end
   local threads = self.threads
   local size, batch = self.__size, self.batch
 
@@ -113,8 +129,8 @@ function DataLoader:run()
       threads:addjob(
         function(bsz, hfreq)
           local inputs, labels
-          local head = 0-- head sampling
-          while head <= 0 or head > 3 do head = torch.floor((torch.uniform()-0.0001) * 3) + 1 end
+          local head = head_sampling(ratio)
+          
           for i = 1, bsz do
             
             local input, label = _G.ds:get(head)

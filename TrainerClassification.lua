@@ -38,8 +38,8 @@ function Trainer:__init(model, config)
   end
 
   -- parameter / gradient
-  self.pt,self.gt = self.model:getParameters(3);collectgarbage()
-  self.ps,self.gs = self.model:getParameters(2);collectgarbage()
+  self.p_class,self.g_class = self.model:getParameters(3);collectgarbage()
+  self.p_score,self.g_score = self.model:getParameters(2);collectgarbage()
 
   -- allocate cuda tensors
   self.inputs, self.labels = torch.CudaTensor(), torch.CudaTensor()
@@ -72,19 +72,20 @@ function Trainer:train(epoch, dataloader)
 
   local timer = torch.Timer()
   -- print(self.criterion_class.output,self.gt:sum());
-  if epoch > 20 then 
-    print("Using Full Parameters")
-    self.pt,self.gt = self.model:getParameters(1)
+  if epoch > 5 then 
+    self.p_score, self.g_score = self.model:getParameters(5)
+    self.p_class,self.g_class = self.model:getParameters(4)
   end
 
-  local fevalclass = function() return self.criterion_class.output,   self.gt end
-  local fevalscore = function() return self.criterion.output,         self.gs end
-  local feval
+  local fevalclass = function() return self.criterion_class.output,   self.g_class end
+  local fevalscore = function() return self.criterion.output,         self.g_score end
+  local feval, params, optimconfig
 
   local lossum = 0
   for n, sample in dataloader:run_class() do
     if self.debug and n > 100 then break end
     if sample ~= nil then
+
       -- copy samples to the GPU
       self:copySamples(sample)
       -- forward/backward
@@ -95,21 +96,31 @@ function Trainer:train(epoch, dataloader)
       if sample.head == 2 then --score
         lossbatch = self.criterion:forward(outputs, self.labels)
         gradOutputs = self.criterion:backward(outputs, self.labels)
-        feval = fevalclass
+        params = self.p_score
+        optimconfig = self.trunk
+        feval = fevalscore
       elseif sample.head == 3 then --class
         lossbatch = self.criterion_class:forward(outputs, self.labels)
         gradOutputs = self.criterion_class:backward(outputs, self.labels)
-        feval = fevalscore
+        params = self.p_class
+        feval = fevalclass
+        optimconfig = self.trunk
+      end
+
+      if self.debug then
+        print(sample.head)
+        print(lossbatch)
       end
 
       if lossbatch < 10 then
         lossum = lossum + lossbatch
         self.model:zeroGradParameters()
         self.model:backward(self.inputs, gradOutputs, sample.head)
-        optim.sgd(feval, self.pt, self.optimState.trunk)
+        if epoch < 5 then optim.adam(feval, params)
+        else optim.sgd(feval, params, self.optimState.trunk) end
+        
         -- update loss
         self.LM[sample.head]:add(lossbatch)
-        if self.debug then print(lossbatch) end
         if n % 100 == 0 then 
           print("Iter %d\tLoss(Score) %.3f\tLoss(Acc) %.3f" % {n, self.LM[2]:value(), self.LM[3]:value()})
           lossum = 0
@@ -210,9 +221,10 @@ end
 function Trainer:updateScheduler(epoch)
   if self.lr == 0 then
     local regimes = {
-      {   1,  50, 1e-3, 5e-4},
+      {   1,  5, 1e-3, 5e-4},
+      {   6,  20,1e-3, 5e-4},
+      {   21,  50,5e-4, 5e-4},
       {  51, 120, 5e-4, 5e-4},
-      { 121, 1e8, 1e-4, 5e-4}
     }
 
     for _, row in ipairs(regimes) do
@@ -222,6 +234,12 @@ function Trainer:updateScheduler(epoch)
         end
       end
     end
+    -- trunk refers to the branch finetuning lr
+    -- first epoch :fine-tuning epoch
+    if epoch < regimes[1][2] then
+      self.optimState.trunk.learningRate = 0.01
+    end
+
   end
 end
 

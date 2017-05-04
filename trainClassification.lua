@@ -46,7 +46,7 @@ else
 
   default_config.model = resnet
   -- Building DeNet
-  denet = nn.DecompNet(default_config,default_config.layer)
+  denet = nn.ClassNet(default_config,default_config.layer)
   default_config.model = None
 end
 
@@ -60,7 +60,7 @@ local TrainDL,ValDL = DL.create(default_config)
 
 
 
-epoch=31
+epoch=1
 print('| start training')
 for i = 1, 100 do
   

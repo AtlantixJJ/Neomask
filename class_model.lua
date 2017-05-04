@@ -8,9 +8,9 @@ require 'cunn'
 require 'cudnn'
 require 'cutorch'
 
-local DecompNet,_ = torch.class("nn.DecompNet",'nn.Container')
+local ClassNet,_ = torch.class("nn.ClassNet",'nn.Container')
 
-function DecompNet:__init(config,layer)
+function ClassNet:__init(config,layer)
     print("Classification-Only Model from layer %d ." % layer)
     self.gpu1 = config.gpu1
     self.gpu2 = config.gpu2
@@ -36,8 +36,8 @@ function DecompNet:__init(config,layer)
     self.M=self.M:cuda()
     self.scoreBranch = nn.Linear(2048,1):cuda()
     self.classBranch = nn.Linear(2048,90):cuda()
-    self.classNet = nn.Sequential():add(self.M):add(self.scoreBranch)
-    self.scoreNet = nn.Sequential():add(self.M):add(self.classBranch)
+    self.classNet = nn.Sequential():add(self.M):add(self.classBranch)
+    self.scoreNet = nn.Sequential():add(self.M):add(self.scoreBranch)
 
     collectgarbage()
 
@@ -46,7 +46,7 @@ function DecompNet:__init(config,layer)
     self:build_tail()
 end
 
-function DecompNet:precheck()
+function ClassNet:precheck()
     local tempin = torch.rand(1,3,224,224):cuda()
     self.classNet:training()
     local temp = self.classNet:forward(tempin)
@@ -63,7 +63,7 @@ function DecompNet:precheck()
     print("Scale factor  %d " % self.scale)
 end
 
-function DecompNet:forward(input_batch,head)
+function ClassNet:forward(input_batch,head)
     -- input_batch should be CudaTensor in gpu1
     cutorch.setDevice(self.gpu1)
     self.inputs = input_batch
@@ -77,7 +77,7 @@ function DecompNet:forward(input_batch,head)
     return self.output
 end
 
-function DecompNet:backward(input_batch,gradInput,head)
+function ClassNet:backward(input_batch,gradInput,head)
     local gradIn
     cutorch.setDevice(self.gpu1)
     if head == 2 then
@@ -88,7 +88,7 @@ function DecompNet:backward(input_batch,gradInput,head)
     return gradIn
 end
 
-function DecompNet:relevance_forward(input_batch)
+function ClassNet:relevance_forward(input_batch)
     self.inputs = input_batch
     local pre = self.classNet:forward(self.inputs)
 
@@ -116,7 +116,7 @@ function DecompNet:relevance_forward(input_batch)
     return wd:sum(2), rele:sum(2)
 end
 
-function DecompNet:relevance_visualize(input)
+function ClassNet:relevance_visualize(input)
     self.inputs = input
     local pred = self.classNet:forward(self.inputs):clone()
     local softmax = nn.SoftMax():cuda()
@@ -133,7 +133,7 @@ function DecompNet:relevance_visualize(input)
 end
 
 -- tail is used for clearing ups
-function DecompNet:build_tail()
+function ClassNet:build_tail()
     -- scale up to input
     print("Scale %d : %d -> %d" % {4, self.in_size, self.from_size})
 
@@ -146,56 +146,59 @@ function DecompNet:build_tail()
     self.tail = self.tail:cuda()
 end
 
-function DecompNet:training()
+function ClassNet:training()
     cutorch.setDevice(self.gpu1)
     self.classNet:training()
     self.scoreNet:training()
 end
 
-function DecompNet:evaluate()
+function ClassNet:evaluate()
     cutorch.setDevice(self.gpu1)
     self.classNet:evaluate()
     self.scoreNet:evaluate()
 end
 
-function DecompNet:zeroGradParameters()
+function ClassNet:zeroGradParameters()
     cutorch.setDevice(self.gpu1)
     self.classNet:zeroGradParameters()
     self.scoreNet:zeroGradParameters()
 end
 
-function DecompNet:updateParameters(lr,head)
+function ClassNet:updateParameters(lr,head)
     cutorch.setDevice(self.gpu1)
     self.classNet:updateParameters(lr)
     self.scoreNet:updateParameters(lr)
 end
 
-function DecompNet:getParameters(head)
+function ClassNet:getParameters(head)
     -- Partial training
     if head == 3 then --head parameters
-        print("Giving FT head parameters")
+        print("Giving class head parameters")
         return self.classBranch:getParameters()
-    elseif head == 1 then
+    elseif head == 4 then
         -- Full training
-        print("Giving Model Full Parameters")
+        print("Giving Full Classification Parameters")
         return self.classNet:getParameters()
-    elseif head == 2 then --scoreNet
-        print("Giving Score Net parameters")
+    elseif head == 5 then
+        print("Giving Full Score Parameters")
         return self.scoreNet:getParameters()
+    elseif head == 2 then
+        print("Giving Score head parameters")
+        return self.scoreBranch:getParameters()
     end
 end
 
-function DecompNet:cuda()
+function ClassNet:cuda()
     cutorch.setDevice(self.gpu1)
     self.scoreNet:cuda()
     self.classNet:cuda()
 end
 
-function DecompNet:float()
+function ClassNet:float()
     self.M:float()
 end
 
-function DecompNet:clone(...)
+function ClassNet:clone(...)
     local f = torch.MemoryFile("rw"):binary()
     f:writeObject(self); f:seek(1)
     local clone = f:readObject(); f:close()
@@ -207,4 +210,4 @@ function DecompNet:clone(...)
     return clone
 end
 
-return nn.DecompNet
+return nn.ClassNet
