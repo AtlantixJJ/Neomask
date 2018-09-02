@@ -71,7 +71,7 @@ function SharpMask:createVertical(config)
 
     netv:add(nn.SpatialSymmetricPadding(1,1,1,1))
     netv:add(cudnn.SpatialConvolution(nInps,nInps,3,3,1,1))
-    netv:add(cudnn.ReLU())
+    netv:add(cudnn.ReLU(true))
 
     netv:add(nn.SpatialSymmetricPadding(1,1,1,1))
     netv:add(cudnn.SpatialConvolution(nInps,nInps/2,3,3,1,1))
@@ -101,11 +101,11 @@ function SharpMask:createHorizontal(config)
 
     h:add(nn.SpatialSymmetricPadding(1,1,1,1))
     h:add(cudnn.SpatialConvolution(nhu1,nhu2,3,3,1,1))
-    h:add(cudnn.ReLU())
+    h:add(cudnn.ReLU(true))
 
     h:add(nn.SpatialSymmetricPadding(1,1,1,1))
     h:add(cudnn.SpatialConvolution(nhu2,nInps,3,3,1,1))
-    h:add(cudnn.ReLU())
+    h:add(cudnn.ReLU(true))
 
     h:add(nn.SpatialSymmetricPadding(1,1,1,1))
     h:add(cudnn.SpatialConvolution(nInps,nInps/2,3,3,1,1))
@@ -124,7 +124,7 @@ function SharpMask:refinement(neth,netv)
    local par = nn.ParallelTable():add(neth):add(netv)
    ref:add(par)
    ref:add(nn.CAddTable(2))
-   ref:add(cudnn.ReLU())
+   ref:add(cudnn.ReLU(true))
    ref:add(nn.SpatialUpSamplingNearest(2))
 
    return ref:cuda()

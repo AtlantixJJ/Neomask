@@ -17,8 +17,7 @@ where the padded region is treated as constant and
 the gradients are accumulated in the backward pass
 ------------------------------------------------------------------------------]]
 
-local SpatialSymmetricPadding, parent =
-  torch.class('nn.SpatialSymmetricPadding', 'nn.SpatialZeroPadding')
+local SpatialSymmetricPadding, parent = torch.class('nn.SpatialSymmetricPadding', 'nn.SpatialZeroPadding')
 
 function SpatialSymmetricPadding:__init(pad_l, pad_r, pad_t, pad_b)
    parent.__init(self, pad_l, pad_r, pad_t, pad_b)

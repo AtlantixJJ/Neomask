@@ -16,7 +16,9 @@ require 'nn'
 require 'nnx'
 require 'cunn'
 require 'cudnn'
-paths.dofile('SpatialSymmetricPadding.lua')
+if nn.SpatialSymmetricPadding == nil then
+    paths.dofile('SpatialSymmetricPadding.lua')
+end
 local utils = paths.dofile('modelUtils.lua')
 
 local DeepMask,_ = torch.class('nn.DeepMask','nn.Container')
@@ -33,6 +35,9 @@ function DeepMask:__init(config)
   -- create score head
   self:createScoreBranch(config)
 
+  self.maskNet = nn.Sequential():add(self.trunk):add(self.maskBranch)
+  self.scoreNet = nn.Sequential():add(self.trunk):add(self.scoreBranch)
+
   -- number of parameters
   local npt,nps,npm = 0,0,0
   local p1,p2,p3  = self.trunk:parameters(),
@@ -46,19 +51,33 @@ function DeepMask:__init(config)
   print(string.format('| number of paramaters total: %d', npt+nps+npm))
 end
 
-function DeepMask:predict_m(input_batch)
-  local common = self.trunk:forward(input_batch)
-  local score = self.scoreBranch:forward(common)
-  local mask = self.maskBranch:forward(common)
-  return mask,score
+function DeepMask:forward(input_batch, head)
+  if head == 1 then
+    self.output = self.maskNet:forward(input_batch)
+  else
+    self.output = self.scoreNet:forward(input_batch)
+  end
+  return self.output
 end
 
+function DeepMask:backward(input_batch, gradOutput, head)
+  local grad
+  if head == 1 then
+    grad = self.maskNet:backward(input_batch, gradOutput)
+  else
+    grad = self.scoreNet:backward(input_batch, gradOutput)
+  end
+  return grad
+end
 
 --------------------------------------------------------------------------------
 -- function: create common trunk
 function DeepMask:createTrunk(config)
   -- size of feature maps at end of trunk
   self.fSz = config.iSz/16
+  print("Input Size : ", config.iSz)
+  print("Raw output size : ", config.oSz)
+  print("Ground Truth Size : ", config.gSz)
 
   -- load trunk
   local trunk = torch.load('pretrained/resnet-50.t7')
@@ -68,13 +87,17 @@ function DeepMask:createTrunk(config)
 
   -- remove fully connected layers
   trunk:remove();trunk:remove();trunk:remove();trunk:remove()
+  
 
   -- crop central pad
+  -- MODIFIED
   trunk:add(nn.SpatialZeroPadding(-1,-1,-1,-1))
-
+  local tempin = torch.rand(1,3,config.iSz,config.iSz)
+  local res = trunk:cuda():forward(tempin:cuda())
+  print(res:size())
   -- add common extra layers
   trunk:add(cudnn.SpatialConvolution(1024,128,1,1,1,1))
-  trunk:add(cudnn.ReLU())
+  trunk:add(cudnn.ReLU(true))
   trunk:add(nn.View(config.batch,128*self.fSz*self.fSz))
   trunk:add(nn.Linear(128*self.fSz*self.fSz,512))
 
@@ -120,8 +143,8 @@ function DeepMask:createScoreBranch(config)
   local scoreBranch = nn.Sequential()
   scoreBranch:add(nn.Dropout(.5))
   scoreBranch:add(nn.Linear(512,1024))
-  scoreBranch:add(nn.Threshold(0, 1e-6))
-
+  --scoreBranch:add(nn.Threshold(0, 1e-6))
+  scoreBranch:add(cudnn.ReLU(true))
   scoreBranch:add(nn.Dropout(.5))
   scoreBranch:add(nn.Linear(1024,1))
 

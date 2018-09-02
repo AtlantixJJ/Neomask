@@ -57,12 +57,12 @@ function Neomask:build_Neuint(layer,scale)
     forward_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
     forward_feat:add(cudnn.SpatialConvolution(nFeat,self.fs/scale,self.ks,self.ks,1,1))
     forward_feat:add(nn.SpatialBatchNormalization(self.fs/scale))
-    forward_feat:add(cudnn.ReLU())
+    forward_feat:add(cudnn.ReLU(true))
 
     backward_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
     backward_feat:add(cudnn.SpatialConvolution(nFeat,self.fs/scale,self.ks,self.ks,1,1))
     backward_feat:add(nn.SpatialBatchNormalization(self.fs/scale))
-    backward_feat:add(cudnn.ReLU())
+    backward_feat:add(cudnn.ReLU(true))
 
     fb_feat:add(nn.ParallelTable():add(forward_feat):add(backward_feat))
     fb_feat:add(nn.JoinTable(2)) -- join at (batchNeuint
@@ -70,7 +70,7 @@ function Neomask:build_Neuint(layer,scale)
     fb_feat:add(nn.SpatialZeroPadding(self.pd,self.pd))
     fb_feat:add(cudnn.SpatialConvolution(2*self.fs/scale,self.fs/scale,self.ks,self.ks,1,1))
     fb_feat:add(nn.SpatialBatchNormalization(self.fs/scale))
-    -- Neuint:add(cudnn.ReLU())
+    -- Neuint:add(cudnn.ReLU(true))
 
     Neuint:add(nn.JoinTable(2))
     Neuint:add(nn.SpatialZeroPadding(self.pd,self.pd))

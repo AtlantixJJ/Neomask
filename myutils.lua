@@ -4,6 +4,7 @@ local maskApi = coco.MaskApi
 
 local jet = image.y2jet(torch.linspace(1,1000,1000))
 
+
 function norm(im)
     for i=1,im:size(1) do
         im[i] = (im[i] - im[i]:min()) / (im[i]:max() - im[i]:min())
@@ -109,6 +110,10 @@ end
 function show_mask(im,mask,name)
     maskApi.drawMasks(im, mask, 1)
     image.save(name..".png",im)
+end
+
+function show_data(name,img,lbl)
+    image.save(lbl.."_"..name..".png",norm(img:float()))
 end
 
 function comp_pred(im,mask,pred,name)

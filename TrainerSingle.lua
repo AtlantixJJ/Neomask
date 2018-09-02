@@ -16,8 +16,8 @@ local Trainer = torch.class('Trainer')
 
 --------------------------------------------------------------------------------
 -- function: init
-function Trainer:__init(model, config)
-  print("ParallelNet Trainer Initializing...")
+function Trainer:__init(model, config, head)
+  print("Single Task Trainer Initializing...")
   -- training params
   self.config = config
   self.debug = config.debug
@@ -28,7 +28,7 @@ function Trainer:__init(model, config)
   end
 
   self.criterion = nn.SoftMarginCriterion():cuda()
-  self.criterion_class = nn.CrossEntropyCriterion():type("torch.CudaTensor")
+  self.criterion_class = nn.CrossEntropyCriterion():cuda()
   self.lr = config.lr
   self.act_epoch = 20
   self.branch_epoch = 5
@@ -39,22 +39,20 @@ function Trainer:__init(model, config)
   self:reset_optimState()
 
   -- params and gradparams
-  self.ph,self.gh = model.trunk_head:getParameters();
-  self.pmb,self.gmb = model.maskBranch:getParameters();
-  self.psb,self.gsb = model.scoreBranch:getParameters();
-  if model.classBranch ~= nil then
-    --self.pcb,self.gcb = model.classBranch:getParameters();
-    self.pcb,self.gcb = model.trunk_head_class:getParameters();
-    self.pc,self.gc = model.classNet:getParameters();
+  self.head = head
+  if head == 3 then
+    print("Choosing Class Net")
+    self.params,self.grad_params = model.classNet:getParameters();
+    print(model.classNet)
+  elseif head == 1 then
+    self.params,self.grad_params = model.maskNet:getParameters();collectgarbage()
+    print(model.maskNet)
+  elseif head == 2 then
+    print(model.scoreNet)
+    self.params,self.grad_params = model.scoreNet:getParameters();collectgarbage()
   end
-  if model.new_act ~= nil then
-    self.pa,self.ga = model.new_act:getParameters()
-  end
-  self.pm,self.gm = model.maskNet:getParameters();collectgarbage()
-  self.ps,self.gs = model.scoreNet:getParameters();collectgarbage()
-  
 
-  self:summary_parameters()
+  self:summary_parameters(head)
 
   -- allocate cuda tensors
   -- self.inputs, self.labels = torch.CudaTensor(), torch.CudaTensor()
@@ -64,6 +62,7 @@ function Trainer:__init(model, config)
   self.LM ={LossMeter(),LossMeter(),LossMeter()}
   self.maskmeter  = IouMeter(0.5,config.testmaxload*config.batch)
   self.scoremeter = BinaryMeter()
+
   self.inputs = cutorch.createCudaHostTensor()
   self.labels = torch.CudaTensor()
 
@@ -74,18 +73,20 @@ function Trainer:__init(model, config)
   print("Trainer init done.")
 end
 
-function Trainer:summary_parameters()
-  print("|MaskBranch :  %d " % self.pmb:size()[1])
-  print("|MaskNet    :  %d " % self.pm:size()[1])
-  if self.cm ~= nil then
-    print("|ClassBranch : %d " % self.cmb:size()[1])
-  end
+function Trainer:summary_parameters(head)
+    if head == 1 then
+        print("|MaskNet    :  %d " % self.params:size()[1])
+    elseif head == 3 then
+        print("|ClassNet : %d " % self.params:size()[1])
+    elseif head == 2 then
+        print("|ScoreNet : %d " % self.params:size()[1])
+    end
 end
 
 function Trainer:reset_optimState()
   print("Reset optimState")
-  self.optimState ={}
-  for k,v in pairs({'class','mask','score','trunk','act'}) do
+  self.optimState = {}
+  for k,v in pairs({'optim'}) do
     self.optimState[v] = {
       learningRate = self.config.lr,
       learningRateDecay = 0,
@@ -102,13 +103,11 @@ end
 function Trainer:train(epoch, dataloader)
   print("Start training")
   self.model:training()
-  -- when changing weight to optimize, the optim state need to be reset
-  if epoch == self.branch_epoch then self:reset_optimState() end
+  cutorch.synchronize()
   self.lossmeter:reset()
-  for i=1,3 do self.LM[i]:reset() end
   
   self:updateScheduler(epoch)
-  print("LR : (%.5f,%.5f,%.5f)" % {self.optimState.mask.learningRate, self.optimState.score.learningRate, self.optimState.class.learningRate})
+  print("LR : (%.5f)" % {self.optimState.optim.learningRate})
   print("Ratio :")
   print(self.ratio)
   print("UseAct : true")
@@ -119,55 +118,20 @@ function Trainer:train(epoch, dataloader)
 
   local timer = torch.Timer()
   local bcnt = 0
-  
-  -- choose to use branch or full weights
-  local grad_class = self.gc
-  local param_class = self.pc
-  local grad_mask = self.gm
-  local param_mask = self.pm
-  local grad_score = self.gs
-  local param_score = self.ps
-  if epoch < self.branch_epoch then
-    print("Using Branch Weights.")
-    grad_class = self.gcb
-    grad_mask = self.gmb
-    grad_score = self.gsb
-    param_class = self.pcb
-    param_mask = self.pmb
-    param_score = self.psb
-  else
-    print("Using full weights.")
-  end
 
-  -- print(self.criterion_class.output,self.gt:sum());
-  local fevalclass = function() return self.criterion_class.output, grad_class end
-  local fevaltrunk = function() return 1, self.gh end
-  local fevalmask  = function() return self.criterion.output,   grad_mask end
-  local fevalscore = function() return self.criterion.output,   grad_score end
-  local fevalact = function() return self.criterion.output, self.ga end
-  local templr = self.optimState.class.learningRate
+  local feval = function() return self.criterion.output, self.grad_params end
+
   for n, sample in dataloader:run(self.ratio) do
     -- copy samples to the GPU
     if self.debug and n > 100 then break end
-    if n < 100 then self.optimState.class.learningRate = templr / 10 
-    else self.optimState.class.learningRate = templr end
+
     if sample ~= nil then
       self:copySamples(sample)
+      cutorch.synchronize()
+      collectgarbage()
       if self.debug then print(sample) end
       -- useAct = ( torch.uniform() > 0.5 ) and ( epoch > self.act_epoch)
       self.useAct = true
-      -- forward/backward
-      local params, feval, optimState
-      if sample.head == 3 then -- classification
-        params = param_class
-        feval, optimState = fevalclass, self.optimState.class
-      elseif sample.head == 1 then -- mask
-        params = param_mask
-        feval, optimState= fevalmask, self.optimState.mask
-      elseif sample.head == 2 then -- score
-        params = param_score
-        feval, optimState = fevalscore, self.optimState.score
-      end
 
       ----- FORWARD PASS ------
       -- (inputs, head, ifTrain, ifBranch, useAct)
@@ -184,19 +148,18 @@ function Trainer:train(epoch, dataloader)
         gradOutputs = self.criterion:backward(outputs, self.labels)
         if sample.head == 1 then gradOutputs:mul(self.inputs:size(1)) end
       end
+      
 
       if lossbatch < 10 then -- to avoid exploding gradients      
-        if self.debug then 
-          --print(sample)
-          --print("UseAct : ",useAct)
-          --print("Use Branch:",(epoch < self.branch_epoch))
-          print(lossbatch)
-        end
+        if self.debug then print(lossbatch) end
+        
         ----- BACKWARD PASS ----
-        -- (inputs, head, ifTrain, ifBranch, useAct)
-        -- cutorch.synchronize()
+        
         self.model:zeroGradParameters(sample.head)
-        self.model:backward(self.inputs, gradOutputs, sample.head, epoch < self.branch_epoch, self.useAct)
+        if self.debug then print(gradOutputs:size()) end
+        -- (inputs, head, ifTrain, ifBranch, useAct)
+        r = self.model:backward(self.inputs, gradOutputs, sample.head, false, self.useAct)
+        if self.debug then print(r) end
         ----- BACKWARD PASS ----
 
         ----- UPDATE -----
@@ -217,26 +180,22 @@ function Trainer:train(epoch, dataloader)
             bcnt = 0
           end
         ]]
+
         if self.debug then print("Updating") end
-        if epoch < self.branch_epoch then
-          optim.sgd(feval, params, optimState)
-        else
-          optim.sgd(feval, params, optimState)
-          --self.model:updateParameters(self.optimState.class.learningRate)
-        end
+        optim.sgd(feval, self.params, self.optimState.optim)
 
         if sample.head == 1 and useAct then 
-          optim.sgd(fevalact, self.pa, self.optimState.act)
-          --self.model.new_act:updateParameters(optimState.learningRate)
+          self.model.new_act:updateParameters(self.optimState.optim.learningRate)
         end
+        cutorch.synchronize()
         ----- UPDATE -----
 
-        self.LM[sample.head]:add(lossbatch)
+        self.lossmeter:add(lossbatch)
         if n % imt == 0 then
-          print("Iter %d Loss Statistics : %.5f %.5f %.5f" % {n, self.LM[1]:value(), self.LM[2]:value(), self.LM[3]:value()})
+          print("Iter %d Loss Statistics : %.5f" % {n, self.lossmeter:value()})
         end
       else
-        print("Loss failed. HEAD : %d" % sample.head)
+        print("Loss failed. %f" % lossbatch)
       end
     else
       print("NIL")
@@ -278,6 +237,7 @@ function Trainer:test(epoch, dataloader)
     -- copy input and target to the GPU
     if self.debug and n > 100 then break end
     if sample ~= nil then
+      cutorch.synchronize()
       self:copySamples(sample)
 
       if sample.head == 1 then

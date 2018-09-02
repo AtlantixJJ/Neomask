@@ -14,31 +14,34 @@ end
 local ParallelNet,_ = torch.class("nn.ParallelNet",'nn.Container')
 
 function ParallelNet:set_config(config)
-    self.gpu = config.gpu
-    self.nGPU = config.nGPU
+    self.gpu1 = config.gpu1
+    self.gpu2 = config.gpu2
+    assert(self.gpu1==self.gpu2)
     self.traceback_depth = config.layer - 1
 
     self.config = config
 
     self.name = config.name
     self.softmax = nn.SoftMax():cuda()
-
-    --local temp = self.M:forward(torch.rand(1, 3, self.config.iSz, self.config.iSz):cuda())
-    self.maskfSz = 14
-    self.mask_nfeat = 1024
-    self.class_nfeat = 2048
-    self.class_fSz = 7
-    print("Ground Truth Size : ", self.config.gSz)
-    ---- Determine trunk-out shape (rele-origin)
 end
 
 function ParallelNet:__init(config)
     print("Parallel Model on traceback depth %d ." % config.layer)
     self:set_config(config)
+    cutorch.setDevice(config.gpu1)
+    
 
     -- the preset model cannot be cuda model
     self.M = config.model
-    self.M:remove();self.M:remove();self.M:remove();
+    self.M:remove();self.M:remove();self.M:remove();self.M:remove();
+    
+    --local temp = self.M:forward(torch.rand(1, 3, self.config.iSz, self.config.iSz):cuda())
+    self.fSz = 14
+    self.nfeat = 1024
+    print("Ground Truth Size : ", self.config.gSz)
+    ---- Determine trunk-out shape (rele-origin)
+
+ 
     -- 4*remove : start size is (1024,14,14)
     -- 3*remove : start size is (2048, 7, 7)
 
@@ -49,88 +52,19 @@ function ParallelNet:__init(config)
     self:build_scoreBranch()
 
     -- pre-running to determine shapes
-    --self:precheck_class()
+    self:precheck_class()
     self:build_maskBranch()
-    --self:precheck_mask()
+    self:precheck_mask()
 
-    self:make_nets()
+    self.classNet = nn.Sequential():add(self.trunk):add(self.trunk_head):add(self.classBranch)
+    self.scoreNet = nn.Sequential():add(self.trunk):add(self.trunk_head):add(self.scoreBranch)
+    self.maskNet  = nn.Sequential():add(self.trunk):add(self.maskBranch)
     collectgarbage()
 
     self:make_NewActivation(self.config.activation) 
-    --self:check()
-    self:make_modules()
-    self:make_nets()
+    self:check()
     -- trunk -> trunk_head -> class/score
     -- trunk -> (new_act) -> maskBranch
-end
-
-function ParallelNet:make_modules()
-    self.main_modules = {'trunk', 'trunk_head', 'new_act','classBranch', 'maskBranch', 'scoreBranch'}
-    self.main_nets = {'classNet'}--,'scoreNet','maskNet'}
-end 
-
-function ParallelNet:make_nets()
-    self.classNet = nn.Sequential():add(self.trunk):add(self.trunk_head):add(self.classBranch):cuda()
-    self.scoreNet = nn.Sequential():add(self.trunk):add(self.trunk_head):add(self.scoreBranch):cuda()
-    self.maskNet  = nn.Sequential():add(self.trunk):add(self.maskBranch):cuda()
-end
-
-function ParallelNet:empty_gradInput()
-    function emp(m)
-        m.gradInput = nil
-    end
-    for i,m in pairs(self.main_nets) do
-        self[m]:apply(emp)
-    end
-end
-
-function ParallelNet.shareGradInput(model, tensorType)
-    local function sharingKey(m)
-        local key = torch.type(m)
-        if m.__shareGradInputKey then
-            key = key .. ':' .. m.__shareGradInputKey
-        end
-        return key
-    end
-
-    -- Share gradInput for memory efficient backprop
-    local cache = {}
-    model:apply(function(m)
-        local moduleType = torch.type(m)
-        if torch.isTensor(m.gradInput) and moduleType ~= 'nn.ConcatTable' then
-            local key = sharingKey(m)
-            print(key)
-            if cache[key] == nil then
-                -- get a cudastorage or floatstorage
-                cache[key] = torch[tensorType:match('torch.(%a+)'):gsub('Tensor','Storage')](1)
-            end
-            -- cudatensor with no dimension
-            m.gradInput = torch[tensorType:match('torch.(%a+)')](cache[key], 1, 0)
-        end
-    end)
-    for i, m in ipairs(model:findModules('nn.ConcatTable')) do
-        if cache[i % 2] == nil then
-            cache[i % 2] = torch[tensorType:match('torch.(%a+)'):gsub('Tensor','Storage')](1)
-        end
-        m.gradInput = torch[tensorType:match('torch.(%a+)')](cache[i % 2], 1, 0)
-    end
-end
-
-function ParallelNet:DataParallel(nGPU)
-    print("Making Data Parallel Network (%d)..." % nGPU)
-    self.nGPU = nGPU
-    self:make_modules()
-    for i,m in ipairs(self.main_nets) do
-        print(m)
-        -- First delete all parallel table
-        self[m]:type("torch.CudaTensor")
-        if torch.type(self[m]) == 'nn.DataParallelTable' then
-            self[m] = self[m]:get(1)
-        end
-        ParallelNet.shareGradInput(self[m], "torch.CudaTensor")
-        self[m] = utils.makeDataParallelTable(self[m], self.nGPU)
-    end
-    print("DataParallel End")
 end
 
 function ParallelNet:check()
@@ -168,11 +102,11 @@ function ParallelNet:print_model()
 end
 
 function ParallelNet:build_scoreBranch()
-    self.scoreBranch = nn.Sequential():add(nn.Linear(self.class_nfeat,1)):cuda()
+    self.scoreBranch = nn.Sequential():add(nn.Linear(1024,1)):cuda()
 end
 
 function ParallelNet:build_classBranch()
-    self.classBranch = nn.Sequential():add(nn.Linear(self.class_nfeat,90)):cuda()
+    self.classBranch = nn.Sequential():add(nn.Linear(1024,90)):cuda()
     --- For convenience of backward propagation
     self.trunk_head_class = nn.Sequential():add(self.trunk_head):add(self.classBranch)
 end
@@ -183,8 +117,15 @@ function ParallelNet:build_trunk()
         self.trunk_head:add(self.M.modules[#self.M])
         self.M:remove()
     end
-    self.trunk_head:add(nn.SpatialAveragePooling(self.class_fSz,self.class_fSz,1,1))
-    self.trunk_head:add(nn.View(-1,self.class_nfeat))
+    self.trunk_head:add(nn.SpatialSymmetricPadding(1,1,1,1))
+    self.trunk_head:add(cudnn.SpatialMaxPooling(3,3,2,2))
+    self.trunk_head:add(nn.View(-1,self.nfeat * self.fSz * self.fSz / 4))
+    self.trunk_head:add(nn.Linear(self.nfeat * self.fSz * self.fSz / 4, 1024))
+    self.trunk_head:add(cudnn.ReLU(true))
+    self.trunk_head:add(nn.Dropout(0.75))
+    self.trunk_head:add(nn.Linear(1024, 1024))
+    self.trunk_head:add(cudnn.ReLU(true))
+    self.trunk_head:add(nn.Dropout(0.75))
     self.trunk_head = self.trunk_head:cuda()
     
     --- Trunk is all the common layers
@@ -203,7 +144,7 @@ function ParallelNet:build_maskBranch()
     --maskBranch:add(nn.Dropout(.5))
     --maskBranch:add(nn.Linear(512,56*56))
     --maskBranch:add(nn.View(self.config.batch, 56, 56))
-    local nfeat = self.mask_nfeat
+    local nfeat = self.nfeat
     local dt = 0 -- 2
     -- (1024,14,14)
     self.maskBranch:add(cudnn.SpatialConvolution(nfeat, nfeat/4, 3, 3, 1, 1))
@@ -229,28 +170,10 @@ end
 function ParallelNet:make_NewActivation(activation)
     local input_layer = nn.ParallelTable()
     activation = activation or cudnn.Tanh
-    print("Making newActivation using activation : ")
+    print("Using activation : ")
     print(activation())
     input_layer:add(nn.Identity()) -- nn.CMul(self.from_size[1], self.from_size, self.from_size) -- use multiple
     input_layer:add(nn.Sequential():add(nn.Mul()):add(nn.Add(1,true)):add(activation())) -- use single scale factor
-    --input_layer:add(nn.Sequential():add(nn.CMul(self.from_size[1], self.from_size, self.from_size)):add(nn.CAdd(self.from_size[1], self.from_size, self.from_size)):add(activation))
-    self.new_act = nn.Sequential():add(input_layer):add(nn.CMulTable()):cuda()
-    print(self.new_act)
-end
-
-function ParallelNet:rele_NewActivation(activation)
-    local input_layer = nn.ParallelTable()
-    local trunk_out = nn.Sequential():add(nn.SelectTable(1)) -- select original
-    local grad_out = nn.Sequential():add(nn.SelectTable(2))
-    local rele_out = nn.ParallelTable():add(trunk_out):add(grad_out):add(nn.CMulTable())
-
-    local scale_layer = nn.Sequential():add(rele_out):add(nn.Mul()):add(nn.Add(1,true)):add(activation())
-
-    activation = activation or cudnn.Tanh
-    print("Relevance Activation with : ")
-    print(activation())
-    input_layer:add(nn.Identity()) -- nn.CMul(self.from_size[1], self.from_size, self.from_size) -- use multiple
-    input_layer:add(scale_layer) -- use single scale factor
     --input_layer:add(nn.Sequential():add(nn.CMul(self.from_size[1], self.from_size, self.from_size)):add(nn.CAdd(self.from_size[1], self.from_size, self.from_size)):add(activation))
     self.new_act = nn.Sequential():add(input_layer):add(nn.CMulTable()):cuda()
     print(self.new_act)
@@ -305,6 +228,7 @@ end
 
 function ParallelNet:forward(input_batch,head,iftrain,ifBranch,useAct)
     -- input_batch should be CudaTensor in gpu1
+    cutorch.setDevice(self.gpu1)
     self.inputs = input_batch
 
     if head == 1 then --mask
@@ -340,10 +264,8 @@ function ParallelNet:forward(input_batch,head,iftrain,ifBranch,useAct)
         end
     elseif head == 3 then --class
         if ifBranch then
-            --self.branch_input = self.trunkNet:forward(self.inputs)
-            --self.output = self.classBranch:forward(self.branch_input)
-            self.branch_input = self.trunk:forward(self.inputs)
-            self.output = self.trunk_head_class:forward(self.branch_input)
+            self.branch_input = self.trunkNet:forward(self.inputs)
+            self.output = self.classBranch:forward(self.branch_input)
         else
             self.output = self.classNet:forward(self.inputs)
         end
@@ -354,7 +276,7 @@ end
 
 function ParallelNet:backward(input_batch, gradOutput, head, ifBranch, useAct)
     local gradInput
-
+    cutorch.setDevice(self.gpu1)
     if head == 1 then
         if useAct then 
             gradInput = self.maskBranch:backward(self.branch_input, gradOutput)
@@ -384,7 +306,7 @@ function ParallelNet:backward(input_batch, gradOutput, head, ifBranch, useAct)
         end
     elseif head == 3 then
         if ifBranch then
-            gradInput = self.trunk_head_class:backward(self.branch_input, gradOutput)
+            gradInput = self.classBranch:backward(self.branch_input, gradOutput)
         else
             gradInput = self.classNet:backward(input_batch, gradOutput)
         end
@@ -437,6 +359,7 @@ function ParallelNet:relevance_visualize(input)
 end
 
 function ParallelNet:training()
+    cutorch.setDevice(self.gpu1)
     self.trunk:training()
     self.trunk_head:training()
     self.new_act:training()
@@ -446,6 +369,7 @@ function ParallelNet:training()
 end
 
 function ParallelNet:evaluate()
+    cutorch.setDevice(self.gpu1)
     self.trunk:evaluate()
     self.trunk_head:evaluate()
     self.new_act:evaluate()
@@ -454,27 +378,28 @@ function ParallelNet:evaluate()
     self.scoreBranch:evaluate()
 end
 
-function ParallelNet:zeroGradParameters(head)
-    if head == 1 then 
-        self.maskNet:zeroGradParameters()
-    elseif head == 2 then
-        self.scoreNet:zeroGradParameters()
-    elseif head == 3 then
-        self.classNet:zeroGradParameters()
-    end
+function ParallelNet:zeroGradParameters()
+    cutorch.setDevice(self.gpu1)
+    self.trunk:zeroGradParameters()
+    self.trunk_head:zeroGradParameters()
+    self.new_act:zeroGradParameters()
+    self.classBranch:zeroGradParameters()
+    self.maskBranch:zeroGradParameters()
+    self.scoreBranch:zeroGradParameters()
 end
 
 function ParallelNet:updateParameters(lr)
-    if head == 1 then 
-        self.maskNet:updateParameters(lr)
-    elseif head == 2 then
-        self.scoreNet:updateParameters(lr)
-    elseif head == 3 then
-        self.classNet:updateParameters(lr)
-    end
+    cutorch.setDevice(self.gpu1)
+    self.trunk:updateParameters(lr)
+    self.trunk_head:updateParameters(lr)
+    self.new_act:updateParameters(lr)
+    self.classBranch:updateParameters(lr)
+    self.maskBranch:updateParameters(lr)
+    self.scoreBranch:updateParameters(lr)
 end
 
 function ParallelNet:cuda()
+    cutorch.setDevice(self.gpu1)
     self.trunk:cuda()
     self.trunk_head:cuda()
     self.new_act:cuda()

@@ -103,9 +103,9 @@ function DataLoader:run_class()
 end
 
 local function head_sampling(ratio)
-  local head = 1-- head sampling
+  local head = 3-- head sampling
 
-  local RAND_NUM = (torch.uniform()-0.00001) * ratio:sum()
+  local RAND_NUM = (torch.uniform()) * ratio:sum()
   for i=1,3 do
     if ratio[i] <= RAND_NUM and RAND_NUM <= ratio[i+1] then 
       head = i

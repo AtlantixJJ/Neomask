@@ -1,3 +1,4 @@
+
 --[[
     This model is used to figure out which layer is more suitable for masking
 ]]--
@@ -11,7 +12,7 @@ require 'cutorch'
 local DecompNet,_ = torch.class("nn.DecompNet",'nn.Container')
 
 function DecompNet:__init(config,layer)
-    print("Decomp BaseNet from layer %d ." % layer)
+    print("Decomp BaseNet from layer %d . Backward Only. No droupout. Naive." % layer)
     self.gpu1 = config.gpu1
     self.gpu2 = config.gpu2
     self.layer = layer
@@ -32,17 +33,14 @@ function DecompNet:__init(config,layer)
         -- 1024,8,8
         self.M:add(cudnn.SpatialAveragePooling(7, 7, 1, 1) ) -- same
         self.M:add(nn.View(2048))
-        self.M:add(nn.Dropout(0.5)) -- there is no dropout in origin resnet
         self.M:add(nn.Linear(2048,90)) -- original resnet is 2048 -> 1000
         self.M = self.M:cuda()
+        collectgarbage()
     else
         print("Using Transfer Trained Model...")
         self.M = config.model:cuda()
-        self.trunk_head = self.M[{{self.layer, #self.M}}]
-        self.trunk = self.M[{{1,self.layer}}]
         self.softmax = nn.SoftMax():cuda()
     end
-    collectgarbage()
 
     -- pre-running to determine shapes
     self:precheck()
@@ -53,10 +51,8 @@ function DecompNet:__init(config,layer)
     self:build_maskBranch()
     collectgarbage()
 
-    self.maskNet = nn.Sequential():add(self.M):add(self.gradFit):add(self.maskBranch)
-    self.scoreNet = nn.Sequential():add(self.M):add(self.gradFit):add(self.scoreBranch)
-
-    collectgarbage()
+    self.maskNet = nn.Sequential():add(self.gradFit):add(self.maskBranch)
+    self.scoreNet = nn.Sequential():add(self.gradFit):add(self.scoreBranch)
 end
 
 function DecompNet:build_maskBranch()
@@ -110,16 +106,16 @@ function DecompNet:build_extra()
     self.gradFit = nn.Sequential()
 
     self.gradFit:add(cudnn.SpatialConvolution(self.from_nfeat,64,1,1,1,1))
-    self.gradFit:add(cudnn.ReLU(true))
+    self.gradFit:add(cudnn.ReLU())
 
     self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
     self.gradFit:add(cudnn.SpatialConvolution(64,16,self.ks,self.ks,1,1))
-    self.gradFit:add(cudnn.ReLU(true))
+    self.gradFit:add(cudnn.ReLU())
 
     self.gradFit:add(nn.View(self.config.batch,16*self.from_size*self.from_size))
     self.gradFit:add(nn.Dropout(.5))
     self.gradFit:add(nn.Linear(16*self.from_size*self.from_size,512))
-    self.gradFit:add(cudnn.ReLU(true))
+    self.gradFit:add(cudnn.ReLU())
 
     self.gradFit = self.gradFit:cuda()
 end
@@ -135,7 +131,7 @@ function DecompNet:forward(input_batch,head,train)
     -- to evaluate
     if train == false then self.M:evaluate() end
     local pre = self.M:forward(self.inputs)
-    self.upred = self.softmax:forward(pre)
+
     if head == 3 then
         self.output = pre
         return self.output
@@ -143,13 +139,21 @@ function DecompNet:forward(input_batch,head,train)
 
     local N = #self.M.modules
     local D = N - self.layer + 1
+    pre = pre * 100
+    self.M:zeroGradParameters()
 
     if train == false then self.M:training() end
-    self.trunk_head:c_backward(self.inputs, pre)
+    for i=1,D do
+        if N == i then
+            pre = self.M.modules[N-i+1]:backward(self.inputs, pre)
+        else
+            pre = self.M.modules[N-i+1]:backward(self.M.modules[N-i].output, pre)
+        end
+    end
 
     -- Build refine input
     cutorch.setDevice(self.gpu2)
-    self.ss_in = self.trunk_head.gradInput:clone()
+    self.ss_in = self.M.modules[self.layer].gradInput:clone()
 
     self.common_in = self.gradFit:forward(self.ss_in) -- :clone()
 
@@ -172,16 +176,13 @@ function DecompNet:backward(input_batch,gradInput,head)
 
     cutorch.setDevice(self.gpu2)
     
-    -- for gradoutput dimension mismatch, exam here
     if head == 1 then
-        gradIn = self.maskBranch:backward(self.common_in, gradInput)
+        gradIn = self.maskNet:backward(self.common_in, gradInput)
     elseif head == 2 then
-        gradIn = self.scoreBranch:backward(self.common_in, gradInput)
+        gradIn = self.scoreNet:backward(self.common_in, gradInput)
     end
-    gradIn = self.gradFit:backward(self.ss_in, gradIn)
-    -- make sure gradInput is correct
-    self.trunk_head:forward_prop(gradIn, self.upred)
-    -- print(gradTable)
+    self.gradFitin = self.gradFit:backward(self.ss_in, gradIn) -- :clone()
+    -- fdself.gradResin = self.M:backward(input_batch,self.gradFitin)
 end
 
 function DecompNet:training()

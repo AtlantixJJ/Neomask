@@ -59,89 +59,33 @@ paths.dofile("para_naive.lua")
 local m = torch.load("exps/ParallelNet/NaiveSGD6/model.t7")
 resnet = torch.load("pretrained/resnet-50.t7")
 crit = nn.CrossEntropyCriterion():cuda()
-default_config.model = resnet
+--[[
+default_config.model = resnet:clone()
 MNet = nn.ParallelNet_Mod(default_config)
 default_config.model = None
 MNet:make_nets()
 MNet:DataParallel(2)
+]]
 optimState = {}
 optimState.learningRate = 0.01
-params, grads = MNet.classNet:getParameters()
+params, grads = resnet:getParameters()
 function feval() return crit.output, grads end
-MNet.classNet:training()
+resnet:training()
 im = data[1].inputs
 lbl = data[1].labels
 
 a = cutorch.createCudaHostTensor()
 l = a:resize(im:size()):copy(im)
-
+resnet:apply(function(m) m.gradInput=nil end)
+nn.ParallelNet.shareGradInput(resnet,"torch.CudaTensor")
+resnet = utils.makeDataParallelTable(resnet, 2)
+resnet = resnet:cuda()
 for i=1,5 do
     print(i)
-	res = MNet:forward(a,3)
+	res = resnet:forward(a,3)
 	loss = crit:forward(res,lbl:cuda())
 	gradin = crit:backward(res,lbl:cuda())
-	fake_g = MNet:backward(a,gradin,3)
+	fake_g = resnet:backward(a,gradin,3)
 	optim.sgd(feval, params, optimState)
 	print(loss)
 end
-
-
-
-
-
---[[
-im = torch.CudaTensor()
-im:resize(data[1].inputs:size()):copy(data[1].inputs)
-print(im:size())
-
--- forward
-pred = resnet:forward(im)
-conf,ind = torch.max(pred, 2) -- max decomposition
-resnet:zeroGradParameters()
-
--- build mode matrix
-ind = ind:int()
-dectar = torch.zeros(im:size(1), 1000)
-for i=1,im:size(1) do dectar[i][ind[i][1] ] = 1 end
-
--- take gradient and relevance
-resnet:zeroGradParameters()
-gd = resnet:backward(im,dectar:cuda()):clone()
-rd = torch.cmul(gd,im)
-resnet:zeroGradParameters()
-
-gf = resnet:backward(im,pred):clone()
-rf = torch.cmul(gf,im)
-prefix = '../res/'
-
-thr = 0.7
-for i=1,5 do
-	local title = syn_list[ind[i][1] ]
-	save_comp(im[i],gd[i],(prefix.."gd"..i..title)..".png",thr,true)
-	save_comp(im[i],gf[i],(prefix.."gf"..i..title)..'.png',thr,true)
-	save_comp(im[i],rd[i],prefix..i.."rd.png",thr,true)
-	save_comp(im[i],rf[i],prefix..i.."rf.png",thr,true)
-	print("Distance of 1-hot and full : %.2f" % torch.dist(rd[i],rf[i]))
-end
-]]--
-
---[[
-require 'tds'
-coco = require 'coco'
-cfile = coco.CocoApi("/home/atlantix/COCO/COCO/data/annotations/instances_val2014.json")
-
-function cfile:ind2id(ind)
-	return cfile:loadImgs(cfile.data['images']['id'][ind])[1]['id']
-end
-
-function cfile:getAnn(ind)
-	return cfile:loadAnns(cfile:getAnnIds({imgId=cfile:ind2id(ind)}))
-end
-
-function cfile:eval(item)
-	local imgId = item['image_id']
-	local seg = item['segmentation']['counts']
-	local h = item['segmentation']['size'][1]
-	local w = item['segmentation']['size'][2]
-end
-]]--

@@ -66,6 +66,8 @@ function Trainer:train(epoch, dataloader)
   local fevalmask  = function() return self.criterion.output,   self.gm end
   local fevalscore = function() return self.criterion.output,   self.gs end
 
+  local imt = 100
+
   for n, sample in dataloader:run() do
     -- copy samples to the GPU
     self:copySamples(sample)
@@ -89,12 +91,11 @@ function Trainer:train(epoch, dataloader)
     model:backward(self.inputs, gradOutputs)
 
     -- optimize
-    -- NOTICE !!! Not optimized for semantic segmentation
-    if self.config.fix == false then optim.sgd(fevaltrunk, self.pt, self.optimState.trunk) end
     optim.sgd(feval, params, optimState)
 
     -- update loss
     self.lossmeter:add(lossbatch)
+    if n % imt == 0 then print(self.lossmeter:value()) end
   end
 
   local logepoch

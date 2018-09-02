@@ -14,10 +14,29 @@ local utils = {}
 -- (with inn routines)
 local inn = require 'inn'
 local innutils = require 'inn.utils'
+require 'cudnn'
+
 if not nn.SpatialConstDiagonal then
   torch.class('nn.SpatialConstDiagonal', 'inn.ConstAffine')
 end
 utils.BNtoFixed = innutils.BNtoFixed
+
+function utils.makeDataParallelTable(model, nGPU)
+    if nGPU > 1 then
+        local gpus = torch.range(1, nGPU):totable()
+        local fastest, benchmark = true,true
+ 
+        local dpt = nn.DataParallelTable(1, true, true)
+            :add(model, gpus)
+            :threads(function()
+                localcudnn = require 'cudnn'
+                cudnn.fastest, cudnn.benchmark = fastest, benchmark
+            end)
+        dpt.gradInput = nil
+        model = dpt:cuda()
+    end
+    return model
+end
 
 --------------------------------------------------------------------------------
 -- function: linear2convTrunk
@@ -30,7 +49,7 @@ function utils.linear2convTrunk(net,fSz)
       y.weight:copy(w); y.gradWeight:copy(w); y.bias:copy(x.bias)
       return y
     elseif torch.typename(x):find('Threshold') then
-      return cudnn.ReLU()
+      return cudnn.ReLU(true)
     elseif torch.typename(x):find('View') or
        torch.typename(x):find('SpatialZeroPadding') then
       return nn.Identity()
@@ -52,7 +71,7 @@ function utils.linear2convHead(net)
       y.weight:copy(w); y.gradWeight:copy(w); y.bias:copy(x.bias)
       return y
     elseif torch.typename(x):find('Threshold') then
-      return cudnn.ReLU()
+      return cudnn.ReLU(true)
     elseif not torch.typename(x):find('View') and
       not torch.typename(x):find('Copy') then
       return x

@@ -42,11 +42,11 @@ function DecompNet:build_extra()
 
     self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
     self.gradFit:add(cudnn.SpatialConvolution(256,self.fs,self.ks,self.ks,1,1))
-    self.gradFit:add(cudnn.ReLU())
+    self.gradFit:add(cudnn.ReLU(true))
 
     self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
     self.gradFit:add(cudnn.SpatialConvolution(self.fs,2*self.fs,self.ks,self.ks,1,1))
-    self.gradFit:add(cudnn.ReLU())
+    self.gradFit:add(cudnn.ReLU(true))
 
     self.gradFit:add(nn.SpatialZeroPadding(self.pd,self.pd))
     self.gradFit:add(cudnn.SpatialConvolution(2*self.fs,1,self.ks,self.ks,1,1))
